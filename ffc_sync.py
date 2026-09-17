@@ -1,26 +1,25 @@
+import json
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
 URL_FFC = "https://competitions.ffc.fr/"
+HANDLER = "https://competitions.ffc.fr/handlers/competitions.ashx"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (SuiviVelo FFC Sync)"
 }
 
-print("=== SuiviVelo - Recherche API engagements FFC ===")
-
-# ---------------------------------------------------------
-# 1. Récupération de la page principale
-# ---------------------------------------------------------
+print("=== SuiviVelo - TEST API ENGAGEMENTS FFC ===")
 
 session = requests.Session()
 session.headers.update(HEADERS)
 
-response = session.get(
-    URL_FFC,
-    timeout=30
-)
+# ---------------------------------------------------------
+# 1. Page principale
+# ---------------------------------------------------------
+
+response = session.get(URL_FFC, timeout=30)
 
 print("Page principale HTTP :", response.status_code)
 
@@ -48,15 +47,13 @@ for a in soup.find_all("a", href=True):
 print("Compétitions 2026 trouvées :", len(competitions))
 
 if not competitions:
-    raise RuntimeError(
-        "Aucune compétition 2026 trouvée."
-    )
+    raise RuntimeError("Aucune compétition 2026 trouvée.")
 
 competition_url = competitions[0]
 
 print()
 print("=== COMPÉTITION TEST ===")
-print(competition_url)
+print("URL :", competition_url)
 
 # ---------------------------------------------------------
 # 3. Ouvrir la compétition
@@ -87,176 +84,206 @@ print(
 )
 
 # ---------------------------------------------------------
-# 4. Récupérer tous les scripts
+# 4. Chercher les boutons / éléments contenant
+#    organisation + epreuve
 # ---------------------------------------------------------
-
-scripts = []
-
-for script in competition_soup.find_all("script"):
-
-    content = script.get_text("\n", strip=False)
-
-    if content.strip():
-        scripts.append(content)
-
-javascript = "\n".join(scripts)
 
 print()
-print("Taille JavaScript analysée :", len(javascript), "caractères")
+print("=== RECHERCHE ORGANISATION / EPREUVE ===")
 
-# ---------------------------------------------------------
-# 5. Fonction permettant d'afficher du contexte
-# ---------------------------------------------------------
+epreuves = []
 
-def show_context(keyword, before=2500, after=5000):
+for element in competition_soup.find_all(True):
+
+    organisation = element.get("organisation")
+    epreuve = element.get("epreuve")
+
+    if organisation and epreuve:
+
+        remplacant = element.get("remplacant", "0")
+
+        cle = (
+            organisation,
+            epreuve,
+            remplacant
+        )
+
+        if cle not in [
+            (
+                x["organisation"],
+                x["epreuve"],
+                x["remplacant"]
+            )
+            for x in epreuves
+        ]:
+
+            epreuves.append({
+                "organisation": organisation,
+                "epreuve": epreuve,
+                "remplacant": remplacant,
+                "texte": " ".join(
+                    element.stripped_strings
+                ).strip()
+            })
+
+print("Nombre de combinaisons trouvées :", len(epreuves))
+
+for index, item in enumerate(epreuves, 1):
 
     print()
-    print("=" * 70)
-    print("RECHERCHE :", keyword)
-    print("=" * 70)
+    print("--- EPREUVE", index, "---")
+    print("organisation :", item["organisation"])
+    print("epreuve      :", item["epreuve"])
+    print("remplacant   :", item["remplacant"])
+    print("texte        :", item["texte"][:300])
 
-    lower_js = javascript.lower()
-    lower_keyword = keyword.lower()
+# ---------------------------------------------------------
+# 5. Aucun attribut trouvé
+# ---------------------------------------------------------
 
-    start = 0
-    count = 0
+if not epreuves:
 
-    while True:
+    print()
+    print("ATTENTION : aucun couple organisation/epreuve trouvé.")
+    print("Le HTML devra être analysé différemment.")
 
-        pos = lower_js.find(
-            lower_keyword,
-            start
+    raise SystemExit(0)
+
+# ---------------------------------------------------------
+# 6. Tester getEngagementInfos
+# ---------------------------------------------------------
+
+print()
+print("==============================================")
+print("TEST engagements.getEngagementInfos")
+print("==============================================")
+
+for index, item in enumerate(epreuves, 1):
+
+    print()
+    print("##############################################")
+    print("EPREUVE", index)
+    print("##############################################")
+
+    payload = {
+        "action": "engagements.getEngagementInfos",
+        "organisation": item["organisation"],
+        "epreuve": item["epreuve"],
+        "remplacant": item["remplacant"]
+    }
+
+    print("Payload :", payload)
+
+    try:
+
+        api_response = session.post(
+            HANDLER,
+            data=payload,
+            headers={
+                "Referer": competition_url,
+                "X-Requested-With": "XMLHttpRequest"
+            },
+            timeout=30
         )
 
-        if pos == -1:
-            break
-
-        count += 1
-
-        context_start = max(
-            0,
-            pos - before
-        )
-
-        context_end = min(
-            len(javascript),
-            pos + len(keyword) + after
-        )
+        print("HTTP API :", api_response.status_code)
 
         print()
-        print(
-            f">>> OCCURRENCE {count} "
-            f"à la position {pos}"
-        )
+        print("--- REPONSE BRUTE ---")
 
-        print(
-            javascript[
-                context_start:context_end
-            ]
-        )
+        texte = api_response.text
+
+        # Limite volontaire pour GitHub Actions
+        print(texte[:10000])
 
         print()
-        print("--- FIN CONTEXTE ---")
+        print("--- ANALYSE JSON ---")
 
-        start = pos + len(keyword)
+        try:
 
-        # Éviter un log gigantesque
-        if count >= 5:
+            data = api_response.json()
+
             print(
-                "Maximum de 5 occurrences affichées."
+                json.dumps(
+                    data,
+                    indent=2,
+                    ensure_ascii=False
+                )[:15000]
             )
-            break
 
-    if count == 0:
-        print("Aucune occurrence trouvée.")
+            # ---------------------------------------------
+            # Chercher engagements
+            # ---------------------------------------------
 
-# ---------------------------------------------------------
-# 6. Recherches importantes
-# ---------------------------------------------------------
+            if "engagements" in data:
 
-show_context(
-    "updateEngagementInfos",
-    before=3000,
-    after=7000
-)
+                engagements_raw = data["engagements"]
 
-show_context(
-    "tableEngagement",
-    before=2500,
-    after=6000
-)
+                try:
 
-show_context(
-    'formData.append("action"',
-    before=2000,
-    after=5000
-)
+                    if isinstance(engagements_raw, str):
+                        engagements = json.loads(
+                            engagements_raw
+                        )
+                    else:
+                        engagements = engagements_raw
 
-show_context(
-    "competitionHandlerURL",
-    before=2000,
-    after=5000
-)
+                    print()
+                    print(
+                        "NOMBRE D'ENGAGEMENTS :",
+                        len(engagements)
+                    )
 
-# ---------------------------------------------------------
-# 7. Extraire toutes les ACTIONS envoyées au handler
-# ---------------------------------------------------------
+                    print()
+                    print("=== COUREURS ===")
 
-print()
-print("=" * 70)
-print("ACTIONS DÉTECTÉES")
-print("=" * 70)
+                    for engagement in engagements:
 
-import re
+                        coureur = engagement.get(
+                            "coureur",
+                            {}
+                        )
 
-actions = re.findall(
-    r'formData\.append\s*\(\s*["\']action["\']\s*,\s*["\']([^"\']+)["\']',
-    javascript,
-    flags=re.IGNORECASE
-)
+                        print(
+                            coureur.get("nom", ""),
+                            coureur.get("prenom", ""),
+                            "|",
+                            coureur.get(
+                                "categorieComplete",
+                                ""
+                            ),
+                            "| type =",
+                            engagement.get(
+                                "engagementType"
+                            )
+                        )
 
-unique_actions = []
+                except Exception as erreur:
 
-for action in actions:
-    if action not in unique_actions:
-        unique_actions.append(action)
+                    print(
+                        "Impossible de décoder engagements :",
+                        erreur
+                    )
 
-if unique_actions:
+            else:
 
-    for action in unique_actions:
-        print("ACTION :", action)
+                print(
+                    "Pas de champ 'engagements' "
+                    "dans la réponse."
+                )
 
-else:
-    print("Aucune action détectée.")
+        except Exception:
 
-# ---------------------------------------------------------
-# 8. Rechercher les paramètres liés aux engagements
-# ---------------------------------------------------------
+            print(
+                "La réponse n'est pas un JSON directement décodable."
+            )
 
-print()
-print("=" * 70)
-print("PARAMÈTRES FORMDATA")
-print("=" * 70)
+    except Exception as erreur:
 
-params = re.findall(
-    r'formData\.append\s*\(\s*["\']([^"\']+)["\']',
-    javascript,
-    flags=re.IGNORECASE
-)
-
-unique_params = []
-
-for param in params:
-
-    if param not in unique_params:
-        unique_params.append(param)
-
-for param in unique_params:
-    print("PARAMÈTRE :", param)
-
-# ---------------------------------------------------------
-# FIN
-# ---------------------------------------------------------
+        print(
+            "ERREUR pendant l'appel API :",
+            erreur
+        )
 
 print()
-print("=== FIN ANALYSE API FFC ===")
+print("=== FIN TEST API ENGAGEMENTS FFC ===")
