@@ -9,275 +9,215 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (SuiviVelo FFC Sync)"
 }
 
-print("=== SuiviVelo - RECHERCHE IDENTIFIANTS EPREUVES FFC ===")
+print("=== SuiviVelo - LOCALISATION BOUTONS ENGAGEMENT FFC ===")
 
 session = requests.Session()
 session.headers.update(HEADERS)
 
 # ---------------------------------------------------------
-# 1. Page principale
+# 1. Trouver une compétition
 # ---------------------------------------------------------
 
-response = session.get(URL_FFC, timeout=30)
+r = session.get(URL_FFC, timeout=30)
+r.raise_for_status()
 
-print("Page principale HTTP :", response.status_code)
-
-response.raise_for_status()
-
-soup = BeautifulSoup(response.text, "html.parser")
-
-# ---------------------------------------------------------
-# 2. Trouver une compétition 2026
-# ---------------------------------------------------------
+soup = BeautifulSoup(r.text, "html.parser")
 
 competitions = []
 
 for a in soup.find_all("a", href=True):
+    url = urljoin(URL_FFC, a["href"])
 
-    href = urljoin(URL_FFC, a["href"])
+    if "/calendrier/competition/2026/" in url:
+        if url not in competitions:
+            competitions.append(url)
 
-    if "/calendrier/competition/2026/" in href:
-        if href not in competitions:
-            competitions.append(href)
-
-print("Compétitions 2026 trouvées :", len(competitions))
+print("Compétitions trouvées :", len(competitions))
 
 if not competitions:
-    raise RuntimeError("Aucune compétition trouvée.")
+    raise RuntimeError("Aucune compétition trouvée")
 
 competition_url = competitions[0]
 
-print()
-print("COMPÉTITION TEST :")
-print(competition_url)
+print("Compétition :", competition_url)
 
 # ---------------------------------------------------------
-# 3. Télécharger la compétition
+# 2. Télécharger page
 # ---------------------------------------------------------
 
-response = session.get(
-    competition_url,
-    timeout=30
-)
+r = session.get(competition_url, timeout=30)
+r.raise_for_status()
 
-print("HTTP :", response.status_code)
-
-response.raise_for_status()
-
-html = response.text
-
+html = r.text
 soup = BeautifulSoup(html, "html.parser")
 
 # ---------------------------------------------------------
-# 4. Afficher toutes les balises contenant le mot epreuve
+# 3. Chercher TOUS les appels openEngagementWindow
+#    dans le HTML brut
 # ---------------------------------------------------------
 
 print()
-print("================================================")
-print("BALISES HTML LIÉES AUX EPREUVES")
-print("================================================")
+print("=" * 70)
+print("APPELS openEngagementWindow")
+print("=" * 70)
 
-count = 0
+pattern = re.compile(
+    r'.{0,1500}openEngagementWindow\s*\([^)]*\).{0,1500}',
+    re.IGNORECASE | re.DOTALL
+)
 
-for element in soup.find_all(True):
+matches = pattern.findall(html)
 
-    texte_element = str(element)
+print("Nombre de blocs trouvés :", len(matches))
 
-    attrs = str(element.attrs)
-
-    recherche = (
-        element.name
-        + " "
-        + attrs
-    ).lower()
-
-    if (
-        "epreuve" in recherche
-        or "engagement" in recherche
-        or "organisation" in recherche
-    ):
-
-        # On privilégie les petites balises
-        if len(texte_element) <= 3000:
-
-            count += 1
-
-            print()
-            print("----- ELEMENT", count, "-----")
-            print(texte_element[:3000])
-
-            if count >= 100:
-                break
-
-print()
-print("Nombre d'éléments affichés :", count)
-
-# ---------------------------------------------------------
-# 5. Chercher toutes les occurrences de "epreuve"
-#    directement dans le HTML brut
-# ---------------------------------------------------------
-
-print()
-print("================================================")
-print("CONTEXTE AUTOUR DE 'epreuve'")
-print("================================================")
-
-lower_html = html.lower()
-
-positions = [
-    match.start()
-    for match in re.finditer(
-        "epreuve",
-        lower_html
-    )
-]
-
-print("Occurrences trouvées :", len(positions))
-
-for numero, position in enumerate(
-    positions[:30],
-    1
-):
-
-    debut = max(
-        0,
-        position - 1000
-    )
-
-    fin = min(
-        len(html),
-        position + 2000
-    )
+for i, bloc in enumerate(matches, 1):
 
     print()
-    print(
-        "========== OCCURRENCE",
-        numero,
-        "=========="
-    )
-
-    print(
-        html[debut:fin]
-    )
+    print("######## BLOC", i, "########")
+    print(bloc[:4000])
 
 # ---------------------------------------------------------
-# 6. Rechercher des identifiants numériques potentiels
+# 4. Chercher les balises dont onclick contient
+#    openEngagementWindow
 # ---------------------------------------------------------
 
 print()
-print("================================================")
-print("ATTRIBUTS DATA-*")
-print("================================================")
+print("=" * 70)
+print("BALISES CLIQUABLES")
+print("=" * 70)
 
-data_attrs = set()
+elements = []
 
-for element in soup.find_all(True):
-
-    for key, value in element.attrs.items():
-
-        if key.startswith("data-"):
-
-            data_attrs.add(
-                (
-                    key,
-                    str(value)
-                )
-            )
-
-for key, value in sorted(data_attrs):
-
-    print(
-        key,
-        "=",
-        value[:500]
-    )
-
-# ---------------------------------------------------------
-# 7. Rechercher onclick
-# ---------------------------------------------------------
-
-print()
-print("================================================")
-print("ONCLICK LIÉS AUX ENGAGEMENTS")
-print("================================================")
-
-onclick_found = 0
-
-for element in soup.find_all(
-    attrs={"onclick": True}
-):
+for element in soup.find_all(attrs={"onclick": True}):
 
     onclick = element.get("onclick", "")
 
-    if (
-        "engagement" in onclick.lower()
-        or "epreuve" in onclick.lower()
-    ):
+    if "openEngagementWindow" in onclick:
 
-        onclick_found += 1
+        elements.append(element)
 
-        print()
-        print("BALISE :", element.name)
-        print("ONCLICK :", onclick)
-        print(
-            "HTML :",
-            str(element)[:2000]
-        )
+print("Nombre de balises :", len(elements))
 
-if onclick_found == 0:
-    print("Aucun onclick correspondant.")
-
-# ---------------------------------------------------------
-# 8. Rechercher les appels openEngagementWindow
-# ---------------------------------------------------------
-
-print()
-print("================================================")
-print("RECHERCHE openEngagementWindow")
-print("================================================")
-
-mot = "openEngagementWindow"
-
-start = 0
-numero = 0
-
-while True:
-
-    position = html.find(
-        mot,
-        start
-    )
-
-    if position == -1:
-        break
-
-    numero += 1
-
-    debut = max(
-        0,
-        position - 1500
-    )
-
-    fin = min(
-        len(html),
-        position + 2500
-    )
+for i, element in enumerate(elements, 1):
 
     print()
-    print(
-        "========== RESULTAT",
-        numero,
-        "=========="
-    )
+    print("######## ELEMENT", i, "########")
+    print("BALISE :", element.name)
+    print("ONCLICK :", element.get("onclick"))
 
-    print(
-        html[debut:fin]
-    )
+    print("ATTRIBUTS :")
 
-    start = position + len(mot)
+    for key, value in element.attrs.items():
+        print(" ", key, "=", value)
 
-    if numero >= 20:
-        break
+    print("TEXTE :", element.get_text(" ", strip=True)[:500])
+
+    print("HTML COMPLET :")
+    print(str(element)[:5000])
+
+# ---------------------------------------------------------
+# 5. Chercher directement les attributs organisation,
+#    epreuve et remplacant dans le HTML brut
+# ---------------------------------------------------------
 
 print()
-print("=== FIN RECHERCHE IDENTIFIANTS ===")
+print("=" * 70)
+print("OCCURRENCES ATTRIBUT organisation")
+print("=" * 70)
+
+for mot in [
+    'organisation="',
+    "organisation='",
+    'epreuve="',
+    "epreuve='",
+    'remplacant="',
+    "remplacant='"
+]:
+
+    print()
+    print(">>>", mot)
+
+    positions = [
+        m.start()
+        for m in re.finditer(
+            re.escape(mot),
+            html,
+            re.IGNORECASE
+        )
+    ]
+
+    print("Occurrences :", len(positions))
+
+    for pos in positions[:20]:
+
+        debut = max(0, pos - 800)
+        fin = min(len(html), pos + 1800)
+
+        print()
+        print(html[debut:fin])
+
+# ---------------------------------------------------------
+# 6. Chercher la génération dynamique des boutons
+# ---------------------------------------------------------
+
+print()
+print("=" * 70)
+print("JAVASCRIPT QUI GENERE LES BOUTONS")
+print("=" * 70)
+
+keywords = [
+    'attr("organisation"',
+    "attr('organisation'",
+    'attr("epreuve"',
+    "attr('epreuve'",
+    'attr("remplacant"',
+    "attr('remplacant'",
+    "openEngagementWindow(",
+    "epreuve-engage"
+]
+
+scripts = "\n".join(
+    script.get_text("\n", strip=False)
+    for script in soup.find_all("script")
+    if script.get_text(strip=True)
+)
+
+for keyword in keywords:
+
+    print()
+    print(">>> RECHERCHE :", keyword)
+
+    lower_scripts = scripts.lower()
+    needle = keyword.lower()
+
+    pos = 0
+    compteur = 0
+
+    while True:
+
+        pos = lower_scripts.find(needle, pos)
+
+        if pos == -1:
+            break
+
+        compteur += 1
+
+        debut = max(0, pos - 2500)
+        fin = min(
+            len(scripts),
+            pos + len(keyword) + 3500
+        )
+
+        print()
+        print("--- OCCURRENCE", compteur, "---")
+        print(scripts[debut:fin])
+
+        pos += len(keyword)
+
+        if compteur >= 10:
+            break
+
+    print("TOTAL AFFICHÉ :", compteur)
+
+print()
+print("=== FIN LOCALISATION ===")
