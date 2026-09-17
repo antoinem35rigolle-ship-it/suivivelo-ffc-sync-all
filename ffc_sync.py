@@ -4,23 +4,25 @@ from urllib.parse import urljoin
 
 URL_FFC = "https://competitions.ffc.fr/"
 
-headers = {
+HEADERS = {
     "User-Agent": "Mozilla/5.0 (SuiviVelo FFC Sync)"
 }
 
-print("=== SuiviVelo - Analyse Listes d'engagements FFC ===")
+print("=== SuiviVelo - Recherche API engagements FFC ===")
 
 # ---------------------------------------------------------
-# 1. Page principale FFC
+# 1. Récupération de la page principale
 # ---------------------------------------------------------
 
-response = requests.get(
+session = requests.Session()
+session.headers.update(HEADERS)
+
+response = session.get(
     URL_FFC,
-    headers=headers,
     timeout=30
 )
 
-print("Page principale - HTTP :", response.status_code)
+print("Page principale HTTP :", response.status_code)
 
 if response.status_code != 200:
     raise RuntimeError(
@@ -30,49 +32,50 @@ if response.status_code != 200:
 soup = BeautifulSoup(response.text, "html.parser")
 
 # ---------------------------------------------------------
-# 2. Récupérer les fiches compétition 2026
+# 2. Trouver une compétition 2026
 # ---------------------------------------------------------
 
 competitions = []
 
 for a in soup.find_all("a", href=True):
+
     href = urljoin(URL_FFC, a["href"])
 
     if "/calendrier/competition/2026/" in href:
         if href not in competitions:
             competitions.append(href)
 
-print("Nombre de compétitions 2026 trouvées :", len(competitions))
+print("Compétitions 2026 trouvées :", len(competitions))
 
 if not competitions:
-    raise RuntimeError("Aucune compétition 2026 trouvée.")
-
-# ---------------------------------------------------------
-# 3. Prendre une compétition test
-# ---------------------------------------------------------
+    raise RuntimeError(
+        "Aucune compétition 2026 trouvée."
+    )
 
 competition_url = competitions[0]
 
 print()
 print("=== COMPÉTITION TEST ===")
-print("URL :", competition_url)
+print(competition_url)
 
-competition_response = requests.get(
+# ---------------------------------------------------------
+# 3. Ouvrir la compétition
+# ---------------------------------------------------------
+
+response = session.get(
     competition_url,
-    headers=headers,
     timeout=30
 )
 
-print("HTTP :", competition_response.status_code)
+print("HTTP :", response.status_code)
 
-if competition_response.status_code != 200:
+if response.status_code != 200:
     raise RuntimeError(
-        f"Impossible d'ouvrir la compétition : "
-        f"HTTP {competition_response.status_code}"
+        f"Impossible d'ouvrir la compétition : HTTP {response.status_code}"
     )
 
 competition_soup = BeautifulSoup(
-    competition_response.text,
+    response.text,
     "html.parser"
 )
 
@@ -84,129 +87,176 @@ print(
 )
 
 # ---------------------------------------------------------
-# 4. Trouver précisément "Listes d'engagements"
+# 4. Récupérer tous les scripts
 # ---------------------------------------------------------
 
-print()
-print("=== RECHERCHE DE 'LISTES D'ENGAGEMENTS' ===")
-
-found = False
-
-for element in competition_soup.find_all(
-    ["a", "button", "div", "span", "li"]
-):
-    text = " ".join(element.stripped_strings).strip()
-
-    normalized = (
-        text.lower()
-        .replace("’", "'")
-        .replace("é", "e")
-        .replace("è", "e")
-        .replace("ê", "e")
-    )
-
-    if "liste" in normalized and "engagement" in normalized:
-
-        found = True
-
-        print()
-        print(">>> ÉLÉMENT TROUVÉ")
-        print("Balise :", element.name)
-        print("Texte  :", text[:500])
-
-        print("Attributs :")
-        for key, value in element.attrs.items():
-            print("   ", key, "=", value)
-
-        if element.name == "a":
-            href = element.get("href")
-
-            if href:
-                print(
-                    "URL directe :",
-                    urljoin(competition_url, href)
-                )
-
-        # Parent immédiat
-        parent = element.parent
-
-        if parent:
-            print()
-            print("--- HTML DU PARENT ---")
-            print(str(parent)[:5000])
-
-# ---------------------------------------------------------
-# 5. Chercher aussi les éléments interactifs
-# ---------------------------------------------------------
-
-print()
-print("=== ÉLÉMENTS INTERACTIFS DE LA PAGE ===")
-
-for element in competition_soup.find_all(
-    ["a", "button", "input"]
-):
-
-    text = " ".join(element.stripped_strings).strip()
-
-    attrs = " ".join(
-        f"{k}={v}"
-        for k, v in element.attrs.items()
-    )
-
-    search = (text + " " + attrs).lower()
-
-    if (
-        "engagement" in search
-        or "liste" in search
-        or "participant" in search
-        or "inscrit" in search
-    ):
-        print()
-        print("Balise :", element.name)
-        print("Texte :", text[:300])
-        print("Attributs :", element.attrs)
-
-# ---------------------------------------------------------
-# 6. Recherche dans les scripts JavaScript
-# ---------------------------------------------------------
-
-print()
-print("=== RECHERCHE DANS LES SCRIPTS ===")
-
-script_found = False
+scripts = []
 
 for script in competition_soup.find_all("script"):
 
-    content = script.get_text(" ", strip=True)
+    content = script.get_text("\n", strip=False)
 
-    if not content:
-        continue
+    if content.strip():
+        scripts.append(content)
 
-    lower = content.lower()
+javascript = "\n".join(scripts)
 
-    if (
-        "engagement" in lower
-        or "participant" in lower
-        or "inscrit" in lower
-    ):
-        script_found = True
-
-        print()
-        print("--- SCRIPT POTENTIEL ---")
-        print(content[:4000])
-
-if not script_found:
-    print("Aucun script contenant ces mots.")
+print()
+print("Taille JavaScript analysée :", len(javascript), "caractères")
 
 # ---------------------------------------------------------
-# Résultat
+# 5. Fonction permettant d'afficher du contexte
+# ---------------------------------------------------------
+
+def show_context(keyword, before=2500, after=5000):
+
+    print()
+    print("=" * 70)
+    print("RECHERCHE :", keyword)
+    print("=" * 70)
+
+    lower_js = javascript.lower()
+    lower_keyword = keyword.lower()
+
+    start = 0
+    count = 0
+
+    while True:
+
+        pos = lower_js.find(
+            lower_keyword,
+            start
+        )
+
+        if pos == -1:
+            break
+
+        count += 1
+
+        context_start = max(
+            0,
+            pos - before
+        )
+
+        context_end = min(
+            len(javascript),
+            pos + len(keyword) + after
+        )
+
+        print()
+        print(
+            f">>> OCCURRENCE {count} "
+            f"à la position {pos}"
+        )
+
+        print(
+            javascript[
+                context_start:context_end
+            ]
+        )
+
+        print()
+        print("--- FIN CONTEXTE ---")
+
+        start = pos + len(keyword)
+
+        # Éviter un log gigantesque
+        if count >= 5:
+            print(
+                "Maximum de 5 occurrences affichées."
+            )
+            break
+
+    if count == 0:
+        print("Aucune occurrence trouvée.")
+
+# ---------------------------------------------------------
+# 6. Recherches importantes
+# ---------------------------------------------------------
+
+show_context(
+    "updateEngagementInfos",
+    before=3000,
+    after=7000
+)
+
+show_context(
+    "tableEngagement",
+    before=2500,
+    after=6000
+)
+
+show_context(
+    'formData.append("action"',
+    before=2000,
+    after=5000
+)
+
+show_context(
+    "competitionHandlerURL",
+    before=2000,
+    after=5000
+)
+
+# ---------------------------------------------------------
+# 7. Extraire toutes les ACTIONS envoyées au handler
 # ---------------------------------------------------------
 
 print()
+print("=" * 70)
+print("ACTIONS DÉTECTÉES")
+print("=" * 70)
 
-if found:
-    print("OK : rubrique Listes d'engagements localisée.")
+import re
+
+actions = re.findall(
+    r'formData\.append\s*\(\s*["\']action["\']\s*,\s*["\']([^"\']+)["\']',
+    javascript,
+    flags=re.IGNORECASE
+)
+
+unique_actions = []
+
+for action in actions:
+    if action not in unique_actions:
+        unique_actions.append(action)
+
+if unique_actions:
+
+    for action in unique_actions:
+        print("ACTION :", action)
+
 else:
-    print("ATTENTION : rubrique Listes d'engagements non localisée.")
+    print("Aucune action détectée.")
 
-print("=== Fin analyse FFC ===")
+# ---------------------------------------------------------
+# 8. Rechercher les paramètres liés aux engagements
+# ---------------------------------------------------------
+
+print()
+print("=" * 70)
+print("PARAMÈTRES FORMDATA")
+print("=" * 70)
+
+params = re.findall(
+    r'formData\.append\s*\(\s*["\']([^"\']+)["\']',
+    javascript,
+    flags=re.IGNORECASE
+)
+
+unique_params = []
+
+for param in params:
+
+    if param not in unique_params:
+        unique_params.append(param)
+
+for param in unique_params:
+    print("PARAMÈTRE :", param)
+
+# ---------------------------------------------------------
+# FIN
+# ---------------------------------------------------------
+
+print()
+print("=== FIN ANALYSE API FFC ===")
