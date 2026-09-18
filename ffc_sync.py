@@ -1,9 +1,12 @@
 import requests
-import re
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
+import re
 
-PAGE_URL = "https://competitions.ffc.fr/calendrier/competition/2026/5313014001"
+URL = (
+    "https://licence.ffc.fr/evenements/competitions/calendrier.aspx"
+    "?discipline=5&autourType=ADRESSE&debut=25%2F09%2F2026"
+)
 
 HEADERS = {
     "User-Agent": (
@@ -14,48 +17,191 @@ HEADERS = {
 }
 
 
-def afficher_contexte(source, texte, position, avant=500, apres=1000):
+def contexte(texte, position, avant=500, apres=1000):
     debut = max(0, position - avant)
     fin = min(len(texte), position + apres)
-
-    print("\n" + "=" * 100)
-    print("SOURCE :", source)
-    print("=" * 100)
-    print(texte[debut:fin])
+    return texte[debut:fin]
 
 
 def main():
 
-    print("=== SuiviVelo - RECHERCHE IDENTIFIANTS INTERNES FFC ===")
+    print("=== SuiviVelo - ANALYSE LICENCE.FFC.FR ===")
 
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # ---------------------------------------------------------
-    # 1. Charger la page
-    # ---------------------------------------------------------
+    # --------------------------------------------------
+    # 1. Ouvrir la page
+    # --------------------------------------------------
 
-    response = session.get(PAGE_URL, timeout=30)
+    print("\n=== OUVERTURE PAGE ===")
+    print("URL :", URL)
 
-    print("\nPage :", PAGE_URL)
+    try:
+        response = session.get(
+            URL,
+            timeout=30,
+            allow_redirects=True
+        )
+
+    except Exception as exc:
+        print("ERREUR :", repr(exc))
+        return
+
     print("HTTP :", response.status_code)
+    print("URL finale :", response.url)
+    print("Taille :", len(response.content))
+    print("Cookies :", session.cookies.get_dict())
 
-    response.raise_for_status()
+    print("\nHistorique redirections :")
+
+    if response.history:
+        for r in response.history:
+            print(
+                r.status_code,
+                r.url,
+                "->",
+                r.headers.get("Location")
+            )
+    else:
+        print("Aucune redirection")
+
+    print("\nContent-Type :", response.headers.get("Content-Type"))
 
     html = response.text
+
+    # --------------------------------------------------
+    # 2. Informations générales
+    # --------------------------------------------------
+
     soup = BeautifulSoup(html, "html.parser")
 
-    sources = [
-        ("HTML PAGE COMPETITION", html)
+    print("\n=== PAGE RECUE ===")
+
+    if soup.title:
+        print("TITLE :", soup.title.get_text(" ", strip=True))
+    else:
+        print("TITLE : aucun")
+
+    texte_page = soup.get_text(" ", strip=True)
+
+    print("Longueur texte visible :", len(texte_page))
+
+    print("\nDEBUT TEXTE VISIBLE :")
+    print(texte_page[:3000])
+
+    # --------------------------------------------------
+    # 3. Formulaires
+    # --------------------------------------------------
+
+    print("\n=== FORMULAIRES ===")
+
+    forms = soup.find_all("form")
+
+    print("Nombre :", len(forms))
+
+    for i, form in enumerate(forms, 1):
+
+        print("\nFORMULAIRE", i)
+
+        print("action =", form.get("action"))
+        print("method =", form.get("method"))
+        print("id =", form.get("id"))
+
+        inputs = form.find_all(
+            ["input", "select", "button"]
+        )
+
+        for element in inputs[:100]:
+
+            print(
+                element.name,
+                {
+                    "id": element.get("id"),
+                    "name": element.get("name"),
+                    "value": element.get("value"),
+                    "type": element.get("type")
+                }
+            )
+
+    # --------------------------------------------------
+    # 4. Tous les liens
+    # --------------------------------------------------
+
+    print("\n=== LIENS ===")
+
+    liens = []
+
+    for a in soup.find_all("a", href=True):
+
+        href = urljoin(response.url, a["href"])
+
+        texte = a.get_text(" ", strip=True)
+
+        liens.append((texte, href))
+
+        print(
+            "TEXTE :",
+            repr(texte[:150]),
+            "| URL :",
+            href
+        )
+
+    print("\nNombre de liens :", len(liens))
+
+    # --------------------------------------------------
+    # 5. Liens intéressants
+    # --------------------------------------------------
+
+    print("\n=== LIENS POTENTIELLEMENT INTERESSANTS ===")
+
+    mots_liens = [
+        "engag",
+        "inscri",
+        "participant",
+        "coureur",
+        "liste",
+        "detail",
+        "epreuve",
+        "competition"
     ]
 
-    # ---------------------------------------------------------
-    # 2. Charger tous les scripts
-    # ---------------------------------------------------------
+    nb_interessants = 0
 
-    print("\n=== CHARGEMENT JAVASCRIPT ===")
+    for texte, href in liens:
 
-    numero = 0
+        chaine = (texte + " " + href).lower()
+
+        if any(mot in chaine for mot in mots_liens):
+
+            nb_interessants += 1
+
+            print(
+                "\nTEXTE :",
+                texte
+            )
+
+            print(
+                "URL :",
+                href
+            )
+
+    print(
+        "\nNombre de liens intéressants :",
+        nb_interessants
+    )
+
+    # --------------------------------------------------
+    # 6. Scripts JavaScript
+    # --------------------------------------------------
+
+    print("\n=== JAVASCRIPT ===")
+
+    sources = [
+        ("HTML", html)
+    ]
+
+    numero_script = 0
 
     for script in soup.find_all("script"):
 
@@ -63,28 +209,44 @@ def main():
 
         if src:
 
-            numero += 1
+            numero_script += 1
 
-            url = urljoin(PAGE_URL, src)
+            url_js = urljoin(
+                response.url,
+                src
+            )
 
             try:
 
-                js_response = session.get(url, timeout=30)
-
-                print(
-                    f"JS externe #{numero} : "
-                    f"{url} -> HTTP {js_response.status_code}"
+                js = session.get(
+                    url_js,
+                    timeout=30
                 )
 
-                if js_response.status_code == 200:
+                print(
+                    f"JS #{numero_script}",
+                    url_js,
+                    "HTTP",
+                    js.status_code,
+                    "taille",
+                    len(js.content)
+                )
+
+                if js.status_code == 200:
+
                     sources.append(
-                        (f"JS EXTERNE #{numero} - {url}", js_response.text)
+                        (
+                            f"JS EXTERNE {url_js}",
+                            js.text
+                        )
                     )
 
             except Exception as exc:
 
                 print(
-                    f"ERREUR JS externe #{numero} : {exc}"
+                    "ERREUR JS :",
+                    url_js,
+                    repr(exc)
                 )
 
         else:
@@ -93,198 +255,164 @@ def main():
 
             if contenu.strip():
 
-                numero += 1
+                numero_script += 1
 
                 sources.append(
-                    (f"SCRIPT INLINE #{numero}", contenu)
-                )
-
-    # ---------------------------------------------------------
-    # 3. Chercher des attributs HTML directement
-    # ---------------------------------------------------------
-
-    print("\n=== ATTRIBUTS HTML TROUVES ===")
-
-    compteur = 0
-
-    for tag in soup.find_all(True):
-
-        attrs = tag.attrs
-
-        interessantes = {}
-
-        for cle in [
-            "organisation",
-            "epreuve",
-            "remplacant",
-            "onclick",
-            "data-organisation",
-            "data-epreuve"
-        ]:
-
-            if cle in attrs:
-                interessantes[cle] = attrs[cle]
-
-        if interessantes:
-
-            compteur += 1
-
-            print("\nELEMENT", compteur)
-            print(tag.name)
-            print(interessantes)
-            print(str(tag)[:2000])
-
-    print("\nNombre d'elements :", compteur)
-
-    # ---------------------------------------------------------
-    # 4. Recherche ciblée
-    # ---------------------------------------------------------
-
-    recherches = [
-
-        r'openEngagementWindow',
-
-        r'\.attr\(["\']epreuve["\']',
-
-        r'\.attr\(["\']organisation["\']',
-
-        r'\.attr\(["\']remplacant["\']',
-
-        r'epreuve\s*[:=]',
-
-        r'organisation\s*[:=]',
-
-        r'remplacant\s*[:=]',
-
-        r'epreuve["\']\s*,' ,
-
-        r'organisation["\']\s*,' ,
-
-        r'remplacant["\']\s*,' ,
-
-        r'epreuve-main-engages',
-
-        r'epreuve-engage',
-
-        r'engagements\.getEngagementInfos',
-
-        r'engagements\.',
-
-        r'getEpreuve',
-
-        r'getEpreuves',
-
-        r'epreuvesContenu'
-    ]
-
-    print("\n=== RECHERCHE DANS HTML + JAVASCRIPT ===")
-
-    total = 0
-
-    for source_name, texte in sources:
-
-        for pattern in recherches:
-
-            try:
-
-                matches = list(
-                    re.finditer(
-                        pattern,
-                        texte,
-                        flags=re.IGNORECASE
+                    (
+                        f"JS INLINE #{numero_script}",
+                        contenu
                     )
                 )
 
-            except re.error:
-                continue
+    # --------------------------------------------------
+    # 7. Recherche mots-clés
+    # --------------------------------------------------
+
+    recherches = [
+        "engagement",
+        "engagements",
+        "engage",
+        "engages",
+        "inscription",
+        "inscriptions",
+        "participant",
+        "participants",
+        "coureur",
+        "coureurs",
+        "licencie",
+        "licencies",
+        "liste",
+        "epreuve",
+        "competition",
+        "ajax",
+        "handler",
+        ".ashx",
+        ".asmx",
+        "webmethod",
+        "post",
+        "json"
+    ]
+
+    print("\n=== RECHERCHE MOTS-CLES ===")
+
+    total = 0
+
+    for source_nom, contenu in sources:
+
+        for mot in recherches:
+
+            matches = list(
+                re.finditer(
+                    re.escape(mot),
+                    contenu,
+                    flags=re.IGNORECASE
+                )
+            )
 
             if not matches:
                 continue
 
             print(
-                f"\n>>> {source_name}"
-                f" | motif={pattern}"
-                f" | occurrences={len(matches)}"
+                "\n",
+                "=" * 90
+            )
+
+            print(
+                "SOURCE :",
+                source_nom
+            )
+
+            print(
+                "MOT :",
+                mot
+            )
+
+            print(
+                "OCCURRENCES :",
+                len(matches)
             )
 
             for match in matches[:10]:
 
                 total += 1
 
-                afficher_contexte(
-                    source_name,
-                    texte,
-                    match.start(),
-                    avant=700,
-                    apres=1400
+                print(
+                    "\n--- CONTEXTE ---"
                 )
-
-    # ---------------------------------------------------------
-    # 5. Recherche des nombres proches des noms d'épreuves
-    # ---------------------------------------------------------
-
-    print("\n=== ANALYSE DES EPREUVES ===")
-
-    epreuves = soup.select(".epreuve")
-
-    print("Nombre d'epreuves :", len(epreuves))
-
-    for index, epreuve in enumerate(epreuves, start=1):
-
-        nom_tag = epreuve.select_one(".epreuve-nom")
-
-        nom = (
-            nom_tag.get_text(" ", strip=True)
-            if nom_tag
-            else "INCONNU"
-        )
-
-        print("\n" + "-" * 80)
-        print("EPREUVE", index)
-        print("Nom :", nom)
-
-        print("\nATTRIBUTS DE L'EPREUVE :")
-        print(epreuve.attrs)
-
-        print("\nHTML COMPLET DE L'EPREUVE :")
-        print(str(epreuve)[:10000])
-
-        # Tous les descendants possédant des attributs
-        print("\nDESCENDANTS AVEC ATTRIBUTS :")
-
-        for enfant in epreuve.find_all(True):
-
-            if enfant.attrs:
 
                 print(
-                    enfant.name,
-                    enfant.attrs
+                    contexte(
+                        contenu,
+                        match.start()
+                    )
                 )
 
-    # ---------------------------------------------------------
-    # 6. Recherche de chaînes ressemblant à des identifiants
-    # ---------------------------------------------------------
+    # --------------------------------------------------
+    # 8. Recherche URLs/API dans le code
+    # --------------------------------------------------
 
-    print("\n=== VALEURS AUTOUR DE openEngagementWindow ===")
+    print("\n=== URLs / ENDPOINTS DETECTES ===")
 
-    for source_name, texte in sources:
+    urls_trouvees = set()
 
-        for match in re.finditer(
-            r'openEngagementWindow',
-            texte,
-            flags=re.IGNORECASE
-        ):
+    patterns_url = [
+        r'https?://[^\s"\'<>]+',
+        r'["\']([^"\']+\.ashx[^"\']*)["\']',
+        r'["\']([^"\']+\.asmx[^"\']*)["\']',
+        r'["\']([^"\']+\.aspx[^"\']*)["\']',
+        r'["\']([^"\']+/api/[^"\']*)["\']'
+    ]
 
-            afficher_contexte(
-                source_name,
-                texte,
-                match.start(),
-                avant=1500,
-                apres=3000
-            )
+    for source_nom, contenu in sources:
 
-    print("\n=== FIN ANALYSE ===")
-    print("Contextes trouves :", total)
+        for pattern in patterns_url:
+
+            try:
+
+                matches = re.findall(
+                    pattern,
+                    contenu,
+                    flags=re.IGNORECASE
+                )
+
+            except Exception:
+                continue
+
+            for valeur in matches:
+
+                if isinstance(valeur, tuple):
+                    valeur = "".join(valeur)
+
+                valeur = str(valeur)
+
+                if valeur not in urls_trouvees:
+
+                    urls_trouvees.add(valeur)
+
+                    if any(
+                        mot in valeur.lower()
+                        for mot in [
+                            "ffc",
+                            "engag",
+                            "epreuve",
+                            "competition",
+                            "api",
+                            "handler"
+                        ]
+                    ):
+
+                        print(valeur)
+
+    # --------------------------------------------------
+    # FIN
+    # --------------------------------------------------
+
+    print("\n=== FIN ANALYSE LICENCE.FFC.FR ===")
+
+    print(
+        "Contextes intéressants trouvés :",
+        total
+    )
 
 
 if __name__ == "__main__":
