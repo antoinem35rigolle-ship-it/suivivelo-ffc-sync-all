@@ -1,13 +1,30 @@
+import os
+import json
+import re
+import hashlib
+import unicodedata
+from datetime import datetime, timezone
+
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, unquote
-import re
 
-BASE = "https://competitions.ffc.fr/"
-URL = (
-    "https://competitions.ffc.fr/competition.aspx"
-    "?params=2026%2f5313014001%2fdefault.aspx"
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+VELOPRESSE_URL = (
+    "https://velopressecollection.ouest-france.fr/route/engages/"
+    "38615-pleslin-trigavou-19-septembre-2026-engages-de-course-cycliste.html"
 )
+
+CLUB_RECHERCHE = "CC PLANCOETIN"
+
+COURSE_NAME = "Pleslin Trigavou"
+COURSE_DATE = "19/09/2026"
 
 HEADERS = {
     "User-Agent": (
@@ -15,295 +32,352 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/140.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "fr-FR,fr;q=0.9",
 }
 
 
-def main():
+# ============================================================
+# OUTILS
+# ============================================================
 
-    print("=== SuiviVelo - TEST ANCIENNE PAGE COMPETITION FFC ===")
+def normaliser(texte):
+    if not texte:
+        return ""
 
-    session = requests.Session()
-    session.headers.update(HEADERS)
+    texte = unicodedata.normalize("NFD", texte)
 
-    print("\nURL testee :")
-    print(URL)
-
-    try:
-        r = session.get(
-            URL,
-            timeout=30,
-            allow_redirects=True
-        )
-    except Exception as exc:
-        print("\nERREUR :", repr(exc))
-        return
-
-    print("\n=== REPONSE ===")
-    print("HTTP :", r.status_code)
-    print("URL finale :", r.url)
-    print("Taille :", len(r.content))
-    print("Content-Type :", r.headers.get("Content-Type"))
-    print("Cookies :", session.cookies.get_dict())
-
-    print("\n=== REDIRECTIONS ===")
-
-    if r.history:
-        for i, hist in enumerate(r.history, 1):
-            print(
-                i,
-                hist.status_code,
-                hist.url,
-                "->",
-                hist.headers.get("Location")
-            )
-    else:
-        print("Aucune redirection")
-
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    print("\n=== TITRE ===")
-    print(
-        soup.title.get_text(" ", strip=True)
-        if soup.title
-        else "Aucun titre"
+    texte = "".join(
+        c for c in texte
+        if unicodedata.category(c) != "Mn"
     )
 
-    # ---------------------------------------------------------
-    # TEXTE VISIBLE
-    # ---------------------------------------------------------
+    return texte.upper().strip()
 
-    texte = soup.get_text(" ", strip=True)
 
-    print("\n=== DEBUT TEXTE VISIBLE ===")
-    print(texte[:6000])
+def creer_id_course():
+    brut = f"{COURSE_DATE}|{COURSE_NAME}"
 
-    # ---------------------------------------------------------
-    # RECHERCHE DE TERMES INTERESSANTS
-    # ---------------------------------------------------------
+    return hashlib.sha256(
+        brut.encode("utf-8")
+    ).hexdigest()[:24]
 
-    termes = [
-        "engagé",
-        "engages",
-        "engagés",
-        "engagement",
-        "liste des engagés",
-        "liste des engages",
-        "participant",
-        "participants",
-        "inscrit",
-        "inscrits",
-        "coureur",
-        "coureurs",
-        "club",
-        "dossard",
-        "startlist",
-        "start list",
-        "résultat",
-        "resultat",
-    ]
 
-    print("\n=== TERMES TROUVES ===")
+def creer_id_engagement(course_id, nom, prenom, categorie):
+    brut = (
+        f"{course_id}|"
+        f"{normaliser(nom)}|"
+        f"{normaliser(prenom)}|"
+        f"{normaliser(categorie)}"
+    )
 
-    for terme in termes:
+    return hashlib.sha256(
+        brut.encode("utf-8")
+    ).hexdigest()[:32]
 
-        matches = list(
-            re.finditer(
-                re.escape(terme),
-                r.text,
-                flags=re.IGNORECASE
-            )
+
+# ============================================================
+# FIREBASE
+# ============================================================
+
+def connexion_firebase():
+
+    secret = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+
+    if not secret:
+        raise RuntimeError(
+            "Le secret FIREBASE_SERVICE_ACCOUNT est absent."
         )
 
-        if matches:
+    informations = json.loads(secret)
 
-            print(
-                f"\n>>> {terme} : {len(matches)} occurrence(s)"
-            )
+    cred = credentials.Certificate(informations)
 
-            for match in matches[:5]:
+    firebase_admin.initialize_app(cred)
 
-                debut = max(0, match.start() - 800)
-                fin = min(
-                    len(r.text),
-                    match.start() + 1600
-                )
+    return firestore.client()
 
-                print("\n--- CONTEXTE ---")
-                print(r.text[debut:fin])
 
-    # ---------------------------------------------------------
-    # TOUS LES LIENS
-    # ---------------------------------------------------------
+# ============================================================
+# VELOPRESSE
+# ============================================================
 
-    print("\n=== LIENS INTERESSANTS ===")
+def recuperer_page():
 
-    compteur = 0
+    print("Téléchargement VéloPresse...")
 
-    for a in soup.find_all("a", href=True):
+    response = requests.get(
+        VELOPRESSE_URL,
+        headers=HEADERS,
+        timeout=30
+    )
 
-        href = urljoin(r.url, a["href"])
-        libelle = a.get_text(" ", strip=True)
+    response.raise_for_status()
 
-        chaine = (
-            libelle + " " + href
-        ).lower()
+    print(
+        "Page récupérée :",
+        response.status_code,
+        "-",
+        len(response.content),
+        "octets"
+    )
 
-        if any(
-            mot in chaine
-            for mot in [
-                "engag",
-                "participant",
-                "inscri",
-                "coureur",
-                "liste",
-                "result",
-                "epreuve",
-                "competition",
-                "club"
-            ]
-        ):
+    return response.text
 
-            compteur += 1
 
-            print("\nLIEN", compteur)
-            print("Texte :", libelle)
-            print("URL :", unquote(href))
+def extraire_engages(html):
 
-    print("\nNombre liens intéressants :", compteur)
+    soup = BeautifulSoup(html, "html.parser")
 
-    # ---------------------------------------------------------
-    # IFRAMES
-    # ---------------------------------------------------------
+    texte = soup.get_text("\n", strip=True)
 
-    print("\n=== IFRAMES ===")
+    lignes = [
+        ligne.strip()
+        for ligne in texte.splitlines()
+        if ligne.strip()
+    ]
 
-    iframes = soup.find_all("iframe")
+    engages = []
 
-    print("Nombre :", len(iframes))
+    # Les lignes VéloPresse ont cette forme :
+    #
+    # NOM | Prénom | H/F | U11 | CLUB
+    #
+    # Certaines catégories n'ont pas toujours la colonne sexe.
+    pattern_5 = re.compile(
+        r"^\s*(.*?)\s*\|\s*"
+        r"(.*?)\s*\|\s*"
+        r"([HF])\s*\|\s*"
+        r"(U7|U9|U11|U13|U15|U17)\s*\|\s*"
+        r"(.*?)\s*$",
+        re.IGNORECASE
+    )
 
-    for iframe in iframes:
+    pattern_4 = re.compile(
+        r"^\s*(.*?)\s*\|\s*"
+        r"(.*?)\s*\|\s*"
+        r"(U7|U9|U11|U13|U15|U17)\s*\|\s*"
+        r"(.*?)\s*$",
+        re.IGNORECASE
+    )
 
-        src = iframe.get("src")
+    for ligne in lignes:
+
+        match = pattern_5.match(ligne)
+
+        if match:
+
+            nom = match.group(1).strip()
+            prenom = match.group(2).strip()
+            sexe = match.group(3).upper()
+            categorie = match.group(4).upper()
+            club = match.group(5).strip()
+
+        else:
+
+            match = pattern_4.match(ligne)
+
+            if not match:
+                continue
+
+            nom = match.group(1).strip()
+            prenom = match.group(2).strip()
+            sexe = ""
+            categorie = match.group(3).upper()
+            club = match.group(4).strip()
+
+        if normaliser(club) != normaliser(CLUB_RECHERCHE):
+            continue
+
+        engages.append({
+            "lastName": nom,
+            "firstName": prenom,
+            "sex": sexe,
+            "category": categorie,
+            "club": club
+        })
+
+    return engages
+
+
+# ============================================================
+# FIRESTORE
+# ============================================================
+
+def enregistrer_engages(db, engages):
+
+    course_id = creer_id_course()
+
+    print()
+    print("Course :", COURSE_NAME)
+    print("Date :", COURSE_DATE)
+    print("ID course :", course_id)
+    print()
+
+    nouveaux_ids = set()
+
+    for coureur in engages:
+
+        engagement_id = creer_id_engagement(
+            course_id,
+            coureur["lastName"],
+            coureur["firstName"],
+            coureur["category"]
+        )
+
+        nouveaux_ids.add(engagement_id)
+
+        document = {
+            "courseId": course_id,
+
+            "courseName": COURSE_NAME,
+            "courseDate": COURSE_DATE,
+
+            "firstName": coureur["firstName"],
+            "lastName": coureur["lastName"],
+
+            "runnerName": (
+                coureur["firstName"]
+                + " "
+                + coureur["lastName"]
+            ).strip(),
+
+            "category": coureur["category"],
+            "sex": coureur["sex"],
+            "club": coureur["club"],
+
+            "source": "VELOPRESSE",
+            "sourceUrl": VELOPRESSE_URL,
+
+            "engaged": True,
+
+            "updatedAt": firestore.SERVER_TIMESTAMP
+        }
+
+        db.collection(
+            "ffc_engagements"
+        ).document(
+            engagement_id
+        ).set(
+            document,
+            merge=True
+        )
 
         print(
-            "SRC :",
-            urljoin(r.url, src) if src else None
+            "OK :",
+            coureur["category"],
+            "-",
+            coureur["firstName"],
+            coureur["lastName"]
         )
 
-    # ---------------------------------------------------------
-    # FORMULAIRES
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
+    # SUPPRESSION DES ENGAGEMENTS VELOPRESSE DEVENUS OBSOLETES
+    # --------------------------------------------------------
 
-    print("\n=== FORMULAIRES ===")
-
-    forms = soup.find_all("form")
-
-    print("Nombre :", len(forms))
-
-    for i, form in enumerate(forms, 1):
-
-        print("\nFORM", i)
-        print("Action :", form.get("action"))
-        print("Method :", form.get("method"))
-        print("ID :", form.get("id"))
-
-    # ---------------------------------------------------------
-    # ENDPOINTS DANS LE HTML
-    # ---------------------------------------------------------
-
-    print("\n=== ENDPOINTS POTENTIELS ===")
-
-    patterns = [
-        r'[^"\'\s<>]+\.aspx[^"\'\s<>]*',
-        r'[^"\'\s<>]+\.ashx[^"\'\s<>]*',
-        r'[^"\'\s<>]+\.asmx[^"\'\s<>]*',
-        r'[^"\'\s<>]+\.json[^"\'\s<>]*',
-        r'[^"\'\s<>]+\.xml[^"\'\s<>]*',
-        r'[^"\'\s<>]+\.pdf[^"\'\s<>]*',
-        r'[^"\'\s<>]+\.csv[^"\'\s<>]*',
-        r'[^"\'\s<>]+\.xls[x]?[^"\'\s<>]*',
-    ]
-
-    endpoints = set()
-
-    for pattern in patterns:
-
-        for valeur in re.findall(
-            pattern,
-            r.text,
-            flags=re.IGNORECASE
-        ):
-            endpoints.add(valeur)
-
-    for endpoint in sorted(endpoints):
-        print(unquote(endpoint))
-
-    print(
-        "\nNombre endpoints potentiels :",
-        len(endpoints)
+    anciens = (
+        db.collection("ffc_engagements")
+        .where("courseId", "==", course_id)
+        .stream()
     )
 
-    # ---------------------------------------------------------
-    # JAVASCRIPT INLINE : AJAX / POST / GET
-    # ---------------------------------------------------------
+    supprimes = 0
 
-    print("\n=== JAVASCRIPT / AJAX ===")
+    for document in anciens:
 
-    js_complet = "\n".join(
-        script.get_text()
-        for script in soup.find_all("script")
-        if not script.get("src")
-    )
+        data = document.to_dict()
 
-    mots_js = [
-        "$.ajax",
-        "$.get",
-        "$.post",
-        "fetch(",
-        "XMLHttpRequest",
-        "engagement",
-        "participant",
-        "coureur",
-        "liste",
-    ]
+        if data.get("source") != "VELOPRESSE":
+            continue
 
-    for mot in mots_js:
+        if document.id not in nouveaux_ids:
 
-        matches = list(
-            re.finditer(
-                re.escape(mot),
-                js_complet,
-                flags=re.IGNORECASE
-            )
-        )
+            document.reference.delete()
 
-        if matches:
+            supprimes += 1
 
             print(
-                "\n>>>",
-                mot,
-                ":",
-                len(matches)
+                "SUPPRIMÉ :",
+                data.get("runnerName", document.id)
             )
 
-            for match in matches[:10]:
+    return course_id, supprimes
 
-                debut = max(
-                    0,
-                    match.start() - 700
-                )
 
-                fin = min(
-                    len(js_complet),
-                    match.start() + 1500
-                )
+# ============================================================
+# MAIN
+# ============================================================
 
-                print("\n---")
-                print(js_complet[debut:fin])
+def main():
 
-    print("\n=== FIN TEST ANCIENNE PAGE FFC ===")
+    print()
+    print("==========================================")
+    print(" SUIVIVELO - SYNCHRONISATION VELOPRESSE")
+    print("==========================================")
+    print()
+
+    db = connexion_firebase()
+
+    html = recuperer_page()
+
+    engages = extraire_engages(html)
+
+    print()
+    print(
+        len(engages),
+        "engagé(s) trouvé(s) pour",
+        CLUB_RECHERCHE
+    )
+    print()
+
+    if not engages:
+
+        raise RuntimeError(
+            "Aucun engagé CC PLANCOETIN trouvé. "
+            "La synchronisation est annulée."
+        )
+
+    for coureur in engages:
+
+        print(
+            coureur["category"],
+            "-",
+            coureur["firstName"],
+            coureur["lastName"]
+        )
+
+    course_id, supprimes = enregistrer_engages(
+        db,
+        engages
+    )
+
+    print()
+    print("==========================================")
+    print(" SYNCHRONISATION TERMINÉE")
+    print("==========================================")
+
+    print(
+        "Course :",
+        COURSE_NAME
+    )
+
+    print(
+        "Engagés CCP :",
+        len(engages)
+    )
+
+    print(
+        "Engagements supprimés :",
+        supprimes
+    )
+
+    print(
+        "Collection Firebase : ffc_engagements"
+    )
+
+    print(
+        "Course ID :",
+        course_id
+    )
 
 
 if __name__ == "__main__":
