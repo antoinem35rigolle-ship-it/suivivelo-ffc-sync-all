@@ -19,7 +19,7 @@ jobs:
       - name: Installer les dependances
         run: pip install -r requirements.txt
 
-      - name: Synchroniser les engagements VéloPresse
+      - name: Synchroniser les engages Velopresse
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: python ffc_sync.py
