@@ -1,7 +1,7 @@
 import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
-import re
+import http.client
+import urllib.request
+import time
 
 URL = (
     "https://licence.ffc.fr/evenements/competitions/calendrier.aspx"
@@ -12,406 +12,313 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/140.0 Safari/537.36"
-    )
+        "Chrome/140.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+    "Connection": "close",
 }
 
 
-def contexte(texte, position, avant=500, apres=1000):
-    debut = max(0, position - avant)
-    fin = min(len(texte), position + apres)
-    return texte[debut:fin]
+def afficher_resultat(methode, status, url_finale, contenu):
+    print("\n" + "=" * 90)
+    print("SUCCES :", methode)
+    print("=" * 90)
+
+    print("HTTP :", status)
+    print("URL finale :", url_finale)
+    print("Taille recue :", len(contenu))
+
+    texte = contenu.decode(
+        "utf-8",
+        errors="replace"
+    )
+
+    print("\n=== DEBUT REPONSE ===")
+    print(texte[:15000])
+    print("=== FIN EXTRAIT ===")
+
+    return texte
 
 
-def main():
+def methode_requests_normale():
 
-    print("=== SuiviVelo - ANALYSE LICENCE.FFC.FR ===")
+    print("\n=== TEST 1 : REQUESTS NORMAL ===")
 
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # --------------------------------------------------
-    # 1. Ouvrir la page
-    # --------------------------------------------------
-
-    print("\n=== OUVERTURE PAGE ===")
-    print("URL :", URL)
-
-    try:
-        response = session.get(
-            URL,
-            timeout=30,
-            allow_redirects=True
-        )
-
-    except Exception as exc:
-        print("ERREUR :", repr(exc))
-        return
-
-    print("HTTP :", response.status_code)
-    print("URL finale :", response.url)
-    print("Taille :", len(response.content))
-    print("Cookies :", session.cookies.get_dict())
-
-    print("\nHistorique redirections :")
-
-    if response.history:
-        for r in response.history:
-            print(
-                r.status_code,
-                r.url,
-                "->",
-                r.headers.get("Location")
-            )
-    else:
-        print("Aucune redirection")
-
-    print("\nContent-Type :", response.headers.get("Content-Type"))
-
-    html = response.text
-
-    # --------------------------------------------------
-    # 2. Informations générales
-    # --------------------------------------------------
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    print("\n=== PAGE RECUE ===")
-
-    if soup.title:
-        print("TITLE :", soup.title.get_text(" ", strip=True))
-    else:
-        print("TITLE : aucun")
-
-    texte_page = soup.get_text(" ", strip=True)
-
-    print("Longueur texte visible :", len(texte_page))
-
-    print("\nDEBUT TEXTE VISIBLE :")
-    print(texte_page[:3000])
-
-    # --------------------------------------------------
-    # 3. Formulaires
-    # --------------------------------------------------
-
-    print("\n=== FORMULAIRES ===")
-
-    forms = soup.find_all("form")
-
-    print("Nombre :", len(forms))
-
-    for i, form in enumerate(forms, 1):
-
-        print("\nFORMULAIRE", i)
-
-        print("action =", form.get("action"))
-        print("method =", form.get("method"))
-        print("id =", form.get("id"))
-
-        inputs = form.find_all(
-            ["input", "select", "button"]
-        )
-
-        for element in inputs[:100]:
-
-            print(
-                element.name,
-                {
-                    "id": element.get("id"),
-                    "name": element.get("name"),
-                    "value": element.get("value"),
-                    "type": element.get("type")
-                }
-            )
-
-    # --------------------------------------------------
-    # 4. Tous les liens
-    # --------------------------------------------------
-
-    print("\n=== LIENS ===")
-
-    liens = []
-
-    for a in soup.find_all("a", href=True):
-
-        href = urljoin(response.url, a["href"])
-
-        texte = a.get_text(" ", strip=True)
-
-        liens.append((texte, href))
-
-        print(
-            "TEXTE :",
-            repr(texte[:150]),
-            "| URL :",
-            href
-        )
-
-    print("\nNombre de liens :", len(liens))
-
-    # --------------------------------------------------
-    # 5. Liens intéressants
-    # --------------------------------------------------
-
-    print("\n=== LIENS POTENTIELLEMENT INTERESSANTS ===")
-
-    mots_liens = [
-        "engag",
-        "inscri",
-        "participant",
-        "coureur",
-        "liste",
-        "detail",
-        "epreuve",
-        "competition"
-    ]
-
-    nb_interessants = 0
-
-    for texte, href in liens:
-
-        chaine = (texte + " " + href).lower()
-
-        if any(mot in chaine for mot in mots_liens):
-
-            nb_interessants += 1
-
-            print(
-                "\nTEXTE :",
-                texte
-            )
-
-            print(
-                "URL :",
-                href
-            )
-
-    print(
-        "\nNombre de liens intéressants :",
-        nb_interessants
+    response = session.get(
+        URL,
+        timeout=(15, 60),
+        allow_redirects=True
     )
 
-    # --------------------------------------------------
-    # 6. Scripts JavaScript
-    # --------------------------------------------------
+    return afficher_resultat(
+        "requests normal",
+        response.status_code,
+        response.url,
+        response.content
+    )
 
-    print("\n=== JAVASCRIPT ===")
 
-    sources = [
-        ("HTML", html)
-    ]
+def methode_requests_stream():
 
-    numero_script = 0
+    print("\n=== TEST 2 : REQUESTS STREAM ===")
 
-    for script in soup.find_all("script"):
+    session = requests.Session()
+    session.headers.update(HEADERS)
 
-        src = script.get("src")
+    response = session.get(
+        URL,
+        timeout=(15, 60),
+        allow_redirects=True,
+        stream=True
+    )
 
-        if src:
+    morceaux = []
 
-            numero_script += 1
+    try:
 
-            url_js = urljoin(
-                response.url,
-                src
-            )
+        for chunk in response.iter_content(
+            chunk_size=1024
+        ):
+
+            if chunk:
+                morceaux.append(chunk)
+
+    except Exception as exc:
+
+        print(
+            "Connexion interrompue pendant le stream :",
+            repr(exc)
+        )
+
+        print(
+            "Octets récupérés avant coupure :",
+            sum(len(x) for x in morceaux)
+        )
+
+    contenu = b"".join(morceaux)
+
+    if not contenu:
+        raise RuntimeError(
+            "Aucun contenu récupéré en mode stream"
+        )
+
+    return afficher_resultat(
+        "requests stream / contenu partiel accepté",
+        response.status_code,
+        response.url,
+        contenu
+    )
+
+
+def methode_requests_http10():
+
+    print("\n=== TEST 3 : REQUESTS SANS COMPRESSION ===")
+
+    headers = dict(HEADERS)
+
+    headers["Accept-Encoding"] = "identity"
+    headers["Cache-Control"] = "no-cache"
+
+    session = requests.Session()
+
+    response = session.get(
+        URL,
+        headers=headers,
+        timeout=(15, 60),
+        allow_redirects=True,
+        stream=True
+    )
+
+    morceaux = []
+
+    try:
+
+        response.raw.decode_content = False
+
+        while True:
 
             try:
 
-                js = session.get(
-                    url_js,
-                    timeout=30
-                )
+                data = response.raw.read(1024)
+
+                if not data:
+                    break
+
+                morceaux.append(data)
+
+            except http.client.IncompleteRead as exc:
 
                 print(
-                    f"JS #{numero_script}",
-                    url_js,
-                    "HTTP",
-                    js.status_code,
-                    "taille",
-                    len(js.content)
+                    "IncompleteRead intercepté."
                 )
 
-                if js.status_code == 200:
+                if exc.partial:
+                    morceaux.append(exc.partial)
 
-                    sources.append(
-                        (
-                            f"JS EXTERNE {url_js}",
-                            js.text
-                        )
-                    )
+                break
 
             except Exception as exc:
 
                 print(
-                    "ERREUR JS :",
-                    url_js,
+                    "Lecture interrompue :",
                     repr(exc)
                 )
 
-        else:
+                break
 
-            contenu = script.get_text()
+    finally:
+        response.close()
 
-            if contenu.strip():
+    contenu = b"".join(morceaux)
 
-                numero_script += 1
+    if not contenu:
+        raise RuntimeError(
+            "Aucun contenu récupéré"
+        )
 
-                sources.append(
-                    (
-                        f"JS INLINE #{numero_script}",
-                        contenu
-                    )
-                )
+    return afficher_resultat(
+        "requests lecture brute",
+        response.status_code,
+        response.url,
+        contenu
+    )
 
-    # --------------------------------------------------
-    # 7. Recherche mots-clés
-    # --------------------------------------------------
 
-    recherches = [
-        "engagement",
-        "engagements",
-        "engage",
-        "engages",
-        "inscription",
-        "inscriptions",
-        "participant",
-        "participants",
-        "coureur",
-        "coureurs",
-        "licencie",
-        "licencies",
-        "liste",
-        "epreuve",
-        "competition",
-        "ajax",
-        "handler",
-        ".ashx",
-        ".asmx",
-        "webmethod",
-        "post",
-        "json"
-    ]
+def methode_urllib():
 
-    print("\n=== RECHERCHE MOTS-CLES ===")
+    print("\n=== TEST 4 : URLLIB ===")
 
-    total = 0
+    request = urllib.request.Request(
+        URL,
+        headers=HEADERS
+    )
 
-    for source_nom, contenu in sources:
+    response = urllib.request.urlopen(
+        request,
+        timeout=60
+    )
 
-        for mot in recherches:
+    morceaux = []
 
-            matches = list(
-                re.finditer(
-                    re.escape(mot),
-                    contenu,
-                    flags=re.IGNORECASE
-                )
-            )
+    while True:
 
-            if not matches:
-                continue
+        try:
+
+            data = response.read(1024)
+
+            if not data:
+                break
+
+            morceaux.append(data)
+
+        except http.client.IncompleteRead as exc:
 
             print(
-                "\n",
-                "=" * 90
+                "IncompleteRead intercepté par urllib"
             )
+
+            if exc.partial:
+                morceaux.append(exc.partial)
+
+            break
+
+        except Exception as exc:
 
             print(
-                "SOURCE :",
-                source_nom
+                "Lecture urllib interrompue :",
+                repr(exc)
             )
 
-            print(
-                "MOT :",
-                mot
-            )
+            break
 
-            print(
-                "OCCURRENCES :",
-                len(matches)
-            )
+    contenu = b"".join(morceaux)
 
-            for match in matches[:10]:
+    if not contenu:
+        raise RuntimeError(
+            "urllib : aucun contenu"
+        )
 
-                total += 1
+    return afficher_resultat(
+        "urllib",
+        response.status,
+        response.geturl(),
+        contenu
+    )
 
-                print(
-                    "\n--- CONTEXTE ---"
-                )
 
-                print(
-                    contexte(
-                        contenu,
-                        match.start()
-                    )
-                )
-
-    # --------------------------------------------------
-    # 8. Recherche URLs/API dans le code
-    # --------------------------------------------------
-
-    print("\n=== URLs / ENDPOINTS DETECTES ===")
-
-    urls_trouvees = set()
-
-    patterns_url = [
-        r'https?://[^\s"\'<>]+',
-        r'["\']([^"\']+\.ashx[^"\']*)["\']',
-        r'["\']([^"\']+\.asmx[^"\']*)["\']',
-        r'["\']([^"\']+\.aspx[^"\']*)["\']',
-        r'["\']([^"\']+/api/[^"\']*)["\']'
-    ]
-
-    for source_nom, contenu in sources:
-
-        for pattern in patterns_url:
-
-            try:
-
-                matches = re.findall(
-                    pattern,
-                    contenu,
-                    flags=re.IGNORECASE
-                )
-
-            except Exception:
-                continue
-
-            for valeur in matches:
-
-                if isinstance(valeur, tuple):
-                    valeur = "".join(valeur)
-
-                valeur = str(valeur)
-
-                if valeur not in urls_trouvees:
-
-                    urls_trouvees.add(valeur)
-
-                    if any(
-                        mot in valeur.lower()
-                        for mot in [
-                            "ffc",
-                            "engag",
-                            "epreuve",
-                            "competition",
-                            "api",
-                            "handler"
-                        ]
-                    ):
-
-                        print(valeur)
-
-    # --------------------------------------------------
-    # FIN
-    # --------------------------------------------------
-
-    print("\n=== FIN ANALYSE LICENCE.FFC.FR ===")
+def main():
 
     print(
-        "Contextes intéressants trouvés :",
-        total
+        "=== SuiviVelo - TEST ROBUSTE LICENCE.FFC.FR ==="
+    )
+
+    print("\nURL :")
+    print(URL)
+
+    methodes = [
+        methode_requests_normale,
+        methode_requests_stream,
+        methode_requests_http10,
+        methode_urllib,
+    ]
+
+    succes = False
+
+    for numero, methode in enumerate(
+        methodes,
+        start=1
+    ):
+
+        try:
+
+            texte = methode()
+
+            if texte.strip():
+
+                succes = True
+
+                print(
+                    "\n>>> PAGE RECUPEREE AVEC LA METHODE",
+                    numero
+                )
+
+                break
+
+        except Exception as exc:
+
+            print(
+                "\nECHEC METHODE",
+                numero,
+                ":",
+                repr(exc)
+            )
+
+            time.sleep(2)
+
+    print("\n" + "=" * 90)
+
+    if succes:
+
+        print(
+            "RESULTAT : du contenu a été récupéré."
+        )
+
+    else:
+
+        print(
+            "RESULTAT : aucune méthode n'a permis "
+            "de récupérer la page."
+        )
+
+    print(
+        "=== FIN TEST LICENCE.FFC.FR ==="
     )
 
 
