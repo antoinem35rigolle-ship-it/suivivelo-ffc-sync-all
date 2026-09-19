@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Recuperer le depot
+      - name: Récupérer le dépôt
         uses: actions/checkout@v4
 
       - name: Installer Python
@@ -16,10 +16,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Installer les dependances
+      - name: Installer les dépendances
         run: pip install -r requirements.txt
 
-      - name: Synchroniser les engages Velopresse
+      - name: Synchroniser VéloPresse vers Firebase
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          VELOPRESSE_URL: https://velopressecollection.ouest-france.fr/route/engages/38615-pleslin-trigavou-19-septembre-2026-engages-de-course-cycliste.html
         run: python ffc_sync.py
