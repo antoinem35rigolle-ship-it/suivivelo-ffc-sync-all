@@ -1,92 +1,242 @@
-import os, re, json, hashlib, unicodedata
+import os
+import json
+import re
+import hashlib
+import unicodedata
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+
 import requests
 from bs4 import BeautifulSoup
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-TEST_URL="https://velopressecollection.ouest-france.fr/route/engages/38615-pleslin-trigavou-19-septembre-2026-engages-de-course-cycliste.html"
-VELOPRESSE_URL=os.getenv("VELOPRESSE_URL",TEST_URL).strip()
-CLUB_FILTER=os.getenv("CLUB_FILTER","CC PLANCOETIN").strip()
-HEADERS={"User-Agent":"Mozilla/5.0 Chrome/140.0 Safari/537.36","Accept-Language":"fr-FR,fr;q=0.9"}
+# Course test validée sur VéloPresse.
+VELOPRESSE_URL = os.environ.get(
+    "VELOPRESSE_URL",
+    "https://velopressecollection.ouest-france.fr/route/engages/"
+    "38615-pleslin-trigavou-19-septembre-2026-engages-de-course-cycliste.html"
+)
 
-def clean(v): return re.sub(r"\\s+"," ",v or "").strip()
-def ascii_key(v):
-    v=unicodedata.normalize("NFD",clean(v))
-    v="".join(c for c in v if unicodedata.category(c)!="Mn")
-    return re.sub(r"[^A-Z0-9]+","_",v.upper()).strip("_")
-def cat(v):
-    m=re.search(r"\\b(U7|U9|U11|U13|U15|U17|U19|OPEN|ACCESS)\\b",clean(v).upper())
-    return m.group(1) if m else clean(v).upper()
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
+    ),
+    "Accept-Language": "fr-FR,fr;q=0.9",
+}
 
-def init_db():
-    if firebase_admin._apps: return firestore.client()
-    raw=os.getenv("FIREBASE_SERVICE_ACCOUNT","").strip()
-    if raw: firebase_admin.initialize_app(credentials.Certificate(json.loads(raw)))
-    else: firebase_admin.initialize_app()
+MONTHS = {
+    "janvier": 1, "fevrier": 2, "février": 2, "mars": 3, "avril": 4,
+    "mai": 5, "juin": 6, "juillet": 7, "aout": 8, "août": 8,
+    "septembre": 9, "octobre": 10, "novembre": 11, "decembre": 12,
+    "décembre": 12,
+}
+
+
+def clean(value):
+    return re.sub(r"\s+", " ", (value or "")).strip()
+
+
+def slug(value):
+    value = unicodedata.normalize("NFD", clean(value))
+    value = "".join(c for c in value if unicodedata.category(c) != "Mn")
+    value = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").lower()
+    return value
+
+
+def firebase():
+    raw = os.environ.get("FIREBASE_SERVICE_ACCOUNT", "").strip()
+    if not raw:
+        raise RuntimeError("Secret FIREBASE_SERVICE_ACCOUNT absent.")
+
+    info = json.loads(raw)
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app(credentials.Certificate(info))
     return firestore.client()
 
-def race_info(soup,url):
-    title=clean(soup.find("h1").get_text(" ",strip=True) if soup.find("h1") else "")
-    months={"janvier":1,"fevrier":2,"février":2,"mars":3,"avril":4,"mai":5,"juin":6,"juillet":7,
-            "aout":8,"août":8,"septembre":9,"octobre":10,"novembre":11,"decembre":12,"décembre":12}
-    date=""
-    m=re.search(r"\\b(\\d{1,2})\\s+([A-Za-zÀ-ÿ]+)\\s+(\\d{4})\\b",title)
-    if m and m.group(2).lower() in months:
-        date=f"{int(m.group(1)):02d}/{months[m.group(2).lower()]:02d}/{m.group(3)}"
-    vid=re.search(r"/engages/(\\d+)-",urlparse(url).path)
-    return {"raceName":re.sub(r"\\s+engag[ée]s?.*$","",title,flags=re.I).strip(),
-            "raceDate":date,"velopresseId":vid.group(1) if vid else hashlib.sha1(url.encode()).hexdigest()[:12],
-            "velopresseUrl":url}
 
-def parse_riders(soup):
-    out=[]
-    for row in soup.find_all("tr"):
-        c=[clean(x.get_text(" ",strip=True)) for x in row.find_all(["td","th"])]
-        if len(c)<4: continue
-        if len(c)>=5 and c[2].upper() in {"H","F"}: last,first,sex,category,club=c[:5]
-        else: last,first,category,club=c[:4]; sex=""
-        category=cat(category)
-        if not re.fullmatch(r"U\\d{1,2}|OPEN|ACCESS",category) or not last or not first or not club: continue
-        out.append({"lastName":last,"firstName":first,"sex":sex.upper(),"category":category,"club":club})
-    unique={}
-    for r in out:
-        unique["|".join(map(ascii_key,[r["lastName"],r["firstName"],r["category"],r["club"]]))]=r
+def extract_course_info(soup):
+    h1 = soup.find("h1")
+    title = clean(h1.get_text(" ", strip=True) if h1 else soup.title.get_text(" ", strip=True))
+
+    m = re.search(
+        r"(.+?)\s+(\d{1,2})\s+"
+        r"(janvier|f[ée]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[ée]cembre)"
+        r"\s+(\d{4})",
+        title,
+        flags=re.I,
+    )
+    if not m:
+        raise RuntimeError("Date de course introuvable dans le titre VéloPresse.")
+
+    place = clean(m.group(1))
+    day = int(m.group(2))
+    month = MONTHS[m.group(3).lower()]
+    year = int(m.group(4))
+    course_date = f"{day:02d}/{month:02d}/{year}"
+
+    course_title = re.sub(
+        r"\s+engag[ée]s?.*$",
+        "",
+        title,
+        flags=re.I,
+    ).strip()
+
+    discipline = "CYCLOCROSS" if "/cyclo-cross/" in VELOPRESSE_URL.lower() else "ROUTE"
+    return course_title, place, course_date, discipline
+
+
+def parse_rows(soup):
+    riders = []
+
+    # VéloPresse publie les engagés sous forme de tableaux.
+    for tr in soup.find_all("tr"):
+        cells = [clean(x.get_text(" ", strip=True)) for x in tr.find_all(["td", "th"])]
+        if len(cells) < 4:
+            continue
+
+        # Formats observés :
+        # NOM | Prénom | H/F | Catégorie | Club
+        # NOM | Prénom | Catégorie | Club
+        if len(cells) >= 5 and cells[2].upper() in {"H", "F", "M"}:
+            last_name, first_name, sex, category = cells[0], cells[1], cells[2], cells[3]
+            club = cells[4]
+        else:
+            last_name, first_name = cells[0], cells[1]
+            sex = ""
+            category = cells[-2]
+            club = cells[-1]
+
+        category = clean(category).upper()
+        if not re.fullmatch(r"U\d{1,2}|OPEN|ACCESS|ELITE|ÉLITE", category, flags=re.I):
+            continue
+        if not last_name or not first_name or not club:
+            continue
+
+        riders.append({
+            "lastName": clean(last_name),
+            "firstName": clean(first_name),
+            "sex": clean(sex).upper(),
+            "category": category,
+            "club": clean(club),
+        })
+
+    # Sécurité : si la mise en page n'utilise plus de <tr>, on tente les lignes
+    # textuelles contenant des séparateurs |.
+    if not riders:
+        text = soup.get_text("\n", strip=True)
+        for line in text.splitlines():
+            parts = [clean(x) for x in line.split("|")]
+            if len(parts) < 4:
+                continue
+            if len(parts) >= 5 and parts[2].upper() in {"H", "F", "M"}:
+                last_name, first_name, sex, category, club = parts[:5]
+            else:
+                last_name, first_name, category, club = parts[:4]
+                sex = ""
+            category = category.upper()
+            if re.fullmatch(r"U\d{1,2}|OPEN|ACCESS|ELITE|ÉLITE", category, flags=re.I):
+                riders.append({
+                    "lastName": last_name,
+                    "firstName": first_name,
+                    "sex": sex.upper(),
+                    "category": category,
+                    "club": club,
+                })
+
+    # Déduplication.
+    unique = {}
+    for r in riders:
+        key = "|".join([
+            slug(r["lastName"]), slug(r["firstName"]),
+            slug(r["category"]), slug(r["club"])
+        ])
+        unique[key] = r
     return list(unique.values())
 
-def doc_id(race,r):
-    raw="|".join([race["velopresseId"],r["category"],r["lastName"],r["firstName"],r["club"]])
-    return hashlib.sha1(ascii_key(raw).encode()).hexdigest()
-
-def sync(db,race,riders):
-    col=db.collection("ffc_engagements"); wanted=set(); batch=db.batch(); writes=0
-    for r in riders:
-        did=doc_id(race,r); wanted.add(did)
-        batch.set(col.document(did),{
-            "source":"VELOPRESSE","sourceUrl":race["velopresseUrl"],"velopresseId":race["velopresseId"],
-            "raceName":race["raceName"],"raceDate":race["raceDate"],"category":r["category"],
-            "firstName":r["firstName"],"lastName":r["lastName"],"runnerName":clean(r["firstName"]+" "+r["lastName"]),
-            "sex":r["sex"],"club":r["club"],"engaged":True,"updatedAt":datetime.now(timezone.utc)
-        },merge=True); writes+=1
-    deletes=0
-    for d in col.where("source","==","VELOPRESSE").where("velopresseId","==",race["velopresseId"]).stream():
-        if d.id not in wanted: batch.delete(d.reference); deletes+=1
-    batch.commit()
-    return writes,deletes
 
 def main():
-    print("=== SuiviVelo • Synchronisation VéloPresse ===")
-    print("URL :",VELOPRESSE_URL)
-    r=requests.get(VELOPRESSE_URL,headers=HEADERS,timeout=30); r.raise_for_status()
-    soup=BeautifulSoup(r.text,"html.parser"); race=race_info(soup,VELOPRESSE_URL)
-    riders=parse_riders(soup)
-    if not riders: raise RuntimeError("Aucun engagé détecté : arrêt sans modifier Firebase.")
-    club=[x for x in riders if ascii_key(CLUB_FILTER) in ascii_key(x["club"])]
-    print("Course :",race["raceName"],"•",race["raceDate"])
-    print("Engagés détectés :",len(riders),"•",CLUB_FILTER,":",len(club))
-    for x in club: print(" -",x["category"],"•",x["firstName"],x["lastName"])
-    writes,deletes=sync(init_db(),race,club)
-    print("Firebase : OK • écritures :",writes,"• suppressions obsolètes :",deletes)
+    print("=== SuiviVélo • VéloPresse -> Firebase ===")
+    print("Course :", VELOPRESSE_URL)
 
-if __name__=="__main__": main()
+    response = requests.get(VELOPRESSE_URL, headers=HEADERS, timeout=30)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    title, place, date, discipline = extract_course_info(soup)
+    riders = parse_rows(soup)
+
+    print("Titre      :", title)
+    print("Date       :", date)
+    print("Lieu       :", place)
+    print("Discipline :", discipline)
+    print("Engagés    :", len(riders))
+
+    if not riders:
+        raise RuntimeError("Aucun engagé détecté : aucune écriture Firebase effectuée.")
+
+    db = firebase()
+    collection = db.collection("ffc_engagements")
+
+    # Une actualisation doit refléter la liste VéloPresse actuelle :
+    # on retire d'abord les anciens documents issus de CETTE page.
+    old = list(collection.where("sourceUrl", "==", VELOPRESSE_URL).stream())
+    for start in range(0, len(old), 400):
+        batch = db.batch()
+        for doc in old[start:start + 400]:
+            batch.delete(doc.reference)
+        batch.commit()
+
+    now = datetime.now(timezone.utc)
+    docs = []
+    for rider in riders:
+        runner_name = clean(f'{rider["firstName"]} {rider["lastName"]}')
+        identity = "|".join([
+            VELOPRESSE_URL,
+            rider["category"],
+            rider["lastName"],
+            rider["firstName"],
+            rider["club"],
+        ])
+        doc_id = hashlib.sha1(identity.encode("utf-8")).hexdigest()
+
+        docs.append((
+            collection.document(doc_id),
+            {
+                "title": title,
+                "courseTitle": title,
+                "date": date,
+                "courseDate": date,
+                "place": place,
+                "discipline": discipline,
+                "category": rider["category"],
+                "runnerName": runner_name,
+                "firstName": rider["firstName"],
+                "lastName": rider["lastName"],
+                "sex": rider["sex"],
+                "club": rider["club"],
+                "clubName": rider["club"],
+                "source": "VELOPRESSE",
+                "sourceUrl": VELOPRESSE_URL,
+                "updatedAt": now,
+            },
+        ))
+
+    for start in range(0, len(docs), 400):
+        batch = db.batch()
+        for ref, data in docs[start:start + 400]:
+            batch.set(ref, data)
+        batch.commit()
+
+    ccp = [r for r in riders if "PLANCOET" in slug(r["club"]).upper()]
+    # slug() est en minuscules ; affichage fiable avec comparaison normalisée.
+    ccp = [r for r in riders if "plancoet" in slug(r["club"])]
+
+    print(f"\nOK : {len(riders)} engagé(s) écrit(s) dans ffc_engagements.")
+    print(f"CC Plancoëtin détectés : {len(ccp)}")
+    for r in ccp:
+        print(f' - {r["category"]} • {r["firstName"]} {r["lastName"]}')
+
+
+if __name__ == "__main__":
+    main()
