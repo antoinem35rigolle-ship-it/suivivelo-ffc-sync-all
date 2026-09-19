@@ -2,10 +2,24 @@ name: Synchronisation VéloPresse
 
 on:
   workflow_dispatch:
+    inputs:
+      velopresse_url:
+        description: "URL précise à tester (laisser vide pour toutes les courses)"
+        required: false
+        type: string
+  schedule:
+    # GitHub Actions utilise UTC. Passage toutes les 6 heures pour récupérer
+    # rapidement les listes publiées ou corrigées avant une course.
+    - cron: "17 */6 * * *"
+
+concurrency:
+  group: sync-velopresse
+  cancel-in-progress: false
 
 jobs:
   sync-velopresse:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Récupérer le dépôt
@@ -15,6 +29,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Installer les dépendances
         run: pip install -r requirements.txt
@@ -22,5 +37,7 @@ jobs:
       - name: Synchroniser VéloPresse vers Firebase
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          VELOPRESSE_URL: https://velopressecollection.ouest-france.fr/route/engages/38615-pleslin-trigavou-19-septembre-2026-engages-de-course-cycliste.html
+          VELOPRESSE_URL: ${{ github.event.inputs.velopresse_url || '' }}
+          MAX_ARTICLES: "80"
+          PAST_GRACE_DAYS: "1"
         run: python ffc_sync.py
