@@ -10,6 +10,7 @@ import firebase_admin
 import requests
 from bs4 import BeautifulSoup
 from firebase_admin import credentials, firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 BASE_URL = "https://velopressecollection.ouest-france.fr"
 INDEX_URLS = (
@@ -89,6 +90,7 @@ def is_velopresse_engagement_url(url):
         parsed.netloc == "velopressecollection.ouest-france.fr"
         and "/engages/" in parsed.path
         and parsed.path.endswith(".html")
+        and not re.search(r"/page-\d+\.html$", parsed.path, flags=re.I)
     )
 
 
@@ -193,7 +195,11 @@ def parse_rows(soup):
 
 def replace_course_documents(db, source_url, title, place, race_date, discipline, riders):
     collection = db.collection("ffc_engagements")
-    old = list(collection.where("sourceUrl", "==", source_url).stream())
+    old = list(
+        collection.where(
+            filter=FieldFilter("sourceUrl", "==", source_url)
+        ).stream()
+    )
     for start in range(0, len(old), 400):
         batch = db.batch()
         for document in old[start:start + 400]:
