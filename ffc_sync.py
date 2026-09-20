@@ -265,8 +265,28 @@ def parse_result_rows(soup):
         if not category:
             continue
 
-        last_name, first_name = parts[1], parts[2]
-        club = parts[-1]
+        # Deux présentations sont utilisées par VéloPresse :
+        #   Pleslin : place | NOM | Prénom | Club
+        #   Landivy : place | NOM Prénom | Club | U11-1
+        # Certaines pages ajoutent aussi la catégorie après quatre colonnes.
+        category_at_end = normalize_category(parts[-1])
+        if category_at_end:
+            club = parts[-2]
+            name_cells = parts[1:-2]
+            if len(name_cells) >= 2:
+                last_name = name_cells[0]
+                first_name = " ".join(name_cells[1:])
+            elif len(name_cells) == 1:
+                full_name = name_cells[0].split()
+                if len(full_name) < 2:
+                    continue
+                last_name = " ".join(full_name[:-1])
+                first_name = full_name[-1]
+            else:
+                continue
+        else:
+            last_name, first_name = parts[1], parts[2]
+            club = parts[-1]
         if not last_name or not first_name or not club:
             continue
         results.append({
@@ -362,6 +382,12 @@ def sync_result_article(session, db, source_url):
     if not results:
         return 0, 0, "aucun classement détecté"
 
+    previous_result_documents = list(
+        db.collection("ffc_engagements").where(
+            filter=FieldFilter("resultSourceUrl", "==", source_url)
+        ).stream()
+    )
+
     date_iso = race_date.isoformat()
     date_text = race_date.strftime("%d/%m/%Y")
     existing = list(
@@ -421,6 +447,17 @@ def sync_result_article(session, db, source_url):
         batch = db.batch()
         for reference, data in writes[start:start + 400]:
             batch.set(reference, data, merge=True)
+        batch.commit()
+
+    # Retire les anciennes lignes mal interprétées lorsqu'une page change de
+    # format ou lorsque le parseur est amélioré, sans toucher aux autres courses.
+    active_paths = {reference.path for reference, _ in writes}
+    stale = [document for document in previous_result_documents
+             if document.reference.path not in active_paths]
+    for start in range(0, len(stale), 400):
+        batch = db.batch()
+        for document in stale[start:start + 400]:
+            batch.delete(document.reference)
         batch.commit()
 
     ccp = sum(1 for result in results if "plancoet" in slug(result["club"]))
