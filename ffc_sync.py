@@ -17,6 +17,10 @@ INDEX_URLS = (
     f"{BASE_URL}/route/engages/",
     f"{BASE_URL}/cyclo-cross/engages/",
 )
+RESULT_INDEX_URLS = (
+    f"{BASE_URL}/route/classements/",
+    f"{BASE_URL}/cyclo-cross/classements/",
+)
 MANUAL_URL = os.environ.get("VELOPRESSE_URL", "").strip()
 MAX_ARTICLES = max(1, int(os.environ.get("MAX_ARTICLES", "80")))
 PAST_GRACE_DAYS = max(0, int(os.environ.get("PAST_GRACE_DAYS", "1")))
@@ -94,6 +98,16 @@ def is_velopresse_engagement_url(url):
     )
 
 
+def is_velopresse_result_url(url):
+    parsed = urlparse(url)
+    return (
+        parsed.netloc == "velopressecollection.ouest-france.fr"
+        and "/classements/" in parsed.path
+        and parsed.path.endswith(".html")
+        and not re.search(r"/page-\d+\.html$", parsed.path, flags=re.I)
+    )
+
+
 def discover_article_urls(session):
     """Trouve les fiches récentes sur les index Route et Cyclo-cross."""
     cutoff = datetime.now(timezone.utc).date() - timedelta(days=PAST_GRACE_DAYS)
@@ -105,6 +119,29 @@ def discover_article_urls(session):
         for anchor in soup.find_all("a", href=True):
             url = urljoin(index_url, anchor.get("href", "")).split("#", 1)[0]
             if url in seen or not is_velopresse_engagement_url(url):
+                continue
+            label = clean(anchor.get_text(" ", strip=True))
+            race_date = parse_french_date(label) or parse_french_date(url.replace("-", " "))
+            if race_date is not None and race_date < cutoff:
+                continue
+            seen.add(url)
+            discovered.append(url)
+            if len(discovered) >= MAX_ARTICLES:
+                return discovered
+    return discovered
+
+
+def discover_result_urls(session):
+    """Trouve les classements récemment publiés Route et Cyclo-cross."""
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=14)
+    discovered = []
+    seen = set()
+    for index_url in RESULT_INDEX_URLS:
+        print("Résultats  :", index_url)
+        soup = get_soup(session, index_url)
+        for anchor in soup.find_all("a", href=True):
+            url = urljoin(index_url, anchor.get("href", "")).split("#", 1)[0]
+            if url in seen or not is_velopresse_result_url(url):
                 continue
             label = clean(anchor.get_text(" ", strip=True))
             race_date = parse_french_date(label) or parse_french_date(url.replace("-", " "))
@@ -134,7 +171,7 @@ def extract_course_info(soup, source_url):
         int(match.group(4)), MONTHS[match.group(3).lower()], int(match.group(2))
     )
     course_title = re.sub(
-        r"\s+(engag[ée]e?s?|partant(?:e)?s?|liste\s+des\s+engag[ée]e?s?).*$",
+        r"\s+(engag[ée]e?s?|partant(?:e)?s?|liste\s+des\s+engag[ée]e?s?|classements?|r[ée]sultats?).*$",
         "", raw_title, flags=re.I,
     ).strip()
     discipline = "CYCLOCROSS" if "/cyclo-cross/" in source_url.lower() else "ROUTE"
@@ -190,6 +227,63 @@ def parse_rows(soup):
             slug(rider["category"]), slug(rider["club"]),
         ))
         unique[key] = rider
+    return list(unique.values())
+
+
+def parse_result_rows(soup):
+    """Lit place, nom, prénom, club en conservant la section U7/U9/U11…"""
+    results = []
+    current_category = ""
+    for element in soup.find_all(["h2", "h3", "h4", "h5", "caption", "tr"]):
+        if element.name != "tr":
+            detected = normalize_category(element.get_text(" ", strip=True))
+            if detected:
+                current_category = detected
+            continue
+
+        parts = [clean(cell.get_text(" ", strip=True))
+                 for cell in element.find_all(["td", "th"])]
+        parts = [part for part in parts if part]
+        if len(parts) < 4:
+            continue
+        rank_match = re.search(r"\d+", parts[0])
+        if not rank_match:
+            row_category = normalize_category(" ".join(parts))
+            if row_category:
+                current_category = row_category
+            continue
+        rank = int(rank_match.group(0))
+        if rank <= 0:
+            continue
+
+        row_category = ""
+        for part in parts:
+            row_category = normalize_category(part)
+            if row_category:
+                break
+        category = row_category or current_category
+        if not category:
+            continue
+
+        last_name, first_name = parts[1], parts[2]
+        club = parts[-1]
+        if not last_name or not first_name or not club:
+            continue
+        results.append({
+            "rank": rank,
+            "lastName": last_name,
+            "firstName": first_name,
+            "category": category,
+            "club": club,
+        })
+
+    unique = {}
+    for result in results:
+        key = "|".join((
+            result["category"], slug(result["lastName"]),
+            slug(result["firstName"]), slug(result["club"]),
+        ))
+        unique[key] = result
     return list(unique.values())
 
 
@@ -261,6 +355,82 @@ def sync_article(session, db, source_url):
     return len(riders), len(ccp), "ok"
 
 
+def sync_result_article(session, db, source_url):
+    soup = get_soup(session, source_url)
+    title, place, race_date, discipline = extract_course_info(soup, source_url)
+    results = parse_result_rows(soup)
+    if not results:
+        return 0, 0, "aucun classement détecté"
+
+    date_iso = race_date.isoformat()
+    date_text = race_date.strftime("%d/%m/%Y")
+    existing = list(
+        db.collection("ffc_engagements").where(
+            filter=FieldFilter("courseDateIso", "==", date_iso)
+        ).stream()
+    )
+    by_runner = {}
+    for document in existing:
+        values = document.to_dict() or {}
+        key = "|".join((
+            normalize_category(values.get("category")),
+            slug(values.get("lastName")), slug(values.get("firstName")),
+        ))
+        by_runner.setdefault(key, []).append(document)
+
+    participants_by_category = {}
+    for result in results:
+        category = result["category"]
+        participants_by_category[category] = participants_by_category.get(category, 0) + 1
+
+    now = datetime.now(timezone.utc)
+    writes = []
+    matched = 0
+    for result in results:
+        key = "|".join((
+            result["category"], slug(result["lastName"]), slug(result["firstName"]),
+        ))
+        candidates = by_runner.get(key, [])
+        reference = candidates[0].reference if candidates else None
+        if reference is not None:
+            matched += 1
+        else:
+            identity = "result|" + "|".join((
+                source_url, result["category"], result["lastName"],
+                result["firstName"], result["club"],
+            ))
+            document_id = hashlib.sha1(identity.encode("utf-8")).hexdigest()
+            reference = db.collection("ffc_engagements").document(document_id)
+
+        runner_name = clean(f'{result["firstName"]} {result["lastName"]}')
+        writes.append((reference, {
+            "title": title, "courseTitle": title,
+            "date": date_text, "courseDate": date_text,
+            "courseDateIso": date_iso, "place": place,
+            "discipline": discipline, "category": result["category"],
+            "runnerName": runner_name,
+            "firstName": result["firstName"], "lastName": result["lastName"],
+            "club": result["club"], "clubName": result["club"],
+            "rank": result["rank"],
+            "participants": participants_by_category[result["category"]],
+            "resultSource": "VELOPRESS", "resultSourceUrl": source_url,
+            "resultUpdatedAt": now, "source": "VELOPRESSE", "updatedAt": now,
+        }))
+
+    for start in range(0, len(writes), 400):
+        batch = db.batch()
+        for reference, data in writes[start:start + 400]:
+            batch.set(reference, data, merge=True)
+        batch.commit()
+
+    ccp = sum(1 for result in results if "plancoet" in slug(result["club"]))
+    print(
+        f"RÉSULTATS • {date_text} • {title} • {len(results)} classés • "
+        f"{ccp} CCP • {matched} engagement(s) enrichi(s)"
+    )
+    return len(results), ccp, "ok"
+
+
 def cleanup_old_documents(db):
     """Supprime les listes devenues anciennes pour garder la collection légère."""
     cutoff = datetime.now(timezone.utc).date() - timedelta(days=PAST_GRACE_DAYS)
@@ -268,6 +438,8 @@ def cleanup_old_documents(db):
     obsolete = []
     for document in collection.stream():
         values = document.to_dict() or {}
+        if int(values.get("rank") or 0) > 0:
+            continue
         raw = clean(values.get("courseDateIso"))
         try:
             race_date = date_type.fromisoformat(raw)
@@ -291,18 +463,25 @@ def main():
     print("=== SuiviVélo • VéloPresse -> Firebase ===")
     session = requests.Session()
     db = firebase()
-    urls = [MANUAL_URL] if MANUAL_URL else discover_article_urls(session)
-    if not urls:
+    if MANUAL_URL:
+        engagement_urls = [MANUAL_URL] if is_velopresse_engagement_url(MANUAL_URL) else []
+        result_urls = [MANUAL_URL] if is_velopresse_result_url(MANUAL_URL) else []
+    else:
+        engagement_urls = discover_article_urls(session)
+        result_urls = discover_result_urls(session)
+
+    if not engagement_urls and not result_urls:
         removed = cleanup_old_documents(db)
-        print("Aucune nouvelle fiche d'engagés trouvée sur VéloPresse.")
+        print("Aucune nouvelle fiche d'engagés ou de résultats trouvée sur VéloPresse.")
         print("Anciens docs supprimés :", removed)
         return
-    print("Fiches trouvées :", len(urls))
+    print("Fiches engagés trouvées  :", len(engagement_urls))
+    print("Fiches résultats trouvées:", len(result_urls))
 
     synced = total_riders = total_ccp = 0
     errors = []
-    for index, source_url in enumerate(urls, start=1):
-        print(f"\n[{index}/{len(urls)}] {source_url}")
+    for index, source_url in enumerate(engagement_urls, start=1):
+        print(f"\n[ENGAGÉS {index}/{len(engagement_urls)}] {source_url}")
         try:
             riders, ccp, status = sync_article(session, db, source_url)
             if status == "ok":
@@ -316,16 +495,35 @@ def main():
             errors.append(message)
             print("ERREUR     :", message)
 
+    result_synced = total_results = result_ccp = 0
+    for index, source_url in enumerate(result_urls, start=1):
+        print(f"\n[RÉSULTATS {index}/{len(result_urls)}] {source_url}")
+        try:
+            riders, ccp, status = sync_result_article(session, db, source_url)
+            if status == "ok":
+                result_synced += 1
+                total_results += riders
+                result_ccp += ccp
+            else:
+                print("Ignorée    :", status)
+        except Exception as error:
+            message = f"{source_url} -> {type(error).__name__}: {error}"
+            errors.append(message)
+            print("ERREUR     :", message)
+
     removed = 0 if MANUAL_URL else cleanup_old_documents(db)
     print("\n=== BILAN ===")
     print("Courses synchronisées :", synced)
     print("Engagés écrits         :", total_riders)
     print("Engagés CCP détectés   :", total_ccp)
+    print("Classements synchronisés:", result_synced)
+    print("Résultats écrits        :", total_results)
+    print("Résultats CCP détectés  :", result_ccp)
     print("Anciens docs supprimés :", removed)
     print("Fiches en erreur       :", len(errors))
-    if synced == 0:
+    if synced == 0 and result_synced == 0:
         raise RuntimeError(
-            "Aucune course n'a pu être synchronisée. " + " | ".join(errors[:5])
+            "Aucun engagé ni résultat n'a pu être synchronisé. " + " | ".join(errors[:5])
         )
 
 
