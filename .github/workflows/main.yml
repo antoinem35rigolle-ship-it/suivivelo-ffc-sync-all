@@ -8,9 +8,8 @@ on:
         required: false
         type: string
   schedule:
-    # GitHub Actions utilise UTC. Passage toutes les 6 heures pour récupérer
-    # rapidement les listes publiées ou corrigées avant une course.
-    - cron: "17 */6 * * *"
+    # Deux passages par jour (UTC) pour préserver le quota Firestore.
+    - cron: "17 6,18 * * *"
 
 concurrency:
   group: sync-velopresse
@@ -38,6 +37,6 @@ jobs:
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           VELOPRESSE_URL: ${{ github.event.inputs.velopresse_url || '' }}
-          MAX_ARTICLES: "80"
+          MAX_ARTICLES: "20"
           PAST_GRACE_DAYS: "1"
         run: python ffc_sync.py
