@@ -24,6 +24,9 @@ RESULT_INDEX_URLS = (
 MANUAL_URL = os.environ.get("VELOPRESSE_URL", "").strip()
 MAX_ARTICLES = max(1, int(os.environ.get("MAX_ARTICLES", "80")))
 PAST_GRACE_DAYS = max(0, int(os.environ.get("PAST_GRACE_DAYS", "1")))
+# Un nettoyage complet lit de nombreuses fiches historiques. À lancer
+# ponctuellement avec CLEANUP_OLD_DOCS=1, jamais à chaque synchronisation.
+CLEANUP_OLD_DOCS = os.environ.get("CLEANUP_OLD_DOCS", "0") == "1"
 
 HEADERS = {
     "User-Agent": (
@@ -314,15 +317,12 @@ def replace_course_documents(db, source_url, title, place, race_date, discipline
             filter=FieldFilter("sourceUrl", "==", source_url)
         ).stream()
     )
-    for start in range(0, len(old), 400):
-        batch = db.batch()
-        for document in old[start:start + 400]:
-            batch.delete(document.reference)
-        batch.commit()
+    existing = {document.id: document for document in old}
 
     now = datetime.now(timezone.utc)
     date_text = race_date.strftime("%d/%m/%Y")
     documents = []
+    active_ids = set()
     for rider in riders:
         runner_name = clean(f'{rider["firstName"]} {rider["lastName"]}')
         identity = "|".join((
@@ -330,7 +330,8 @@ def replace_course_documents(db, source_url, title, place, race_date, discipline
             rider["firstName"], rider["club"],
         ))
         document_id = hashlib.sha1(identity.encode("utf-8")).hexdigest()
-        documents.append((collection.document(document_id), {
+        active_ids.add(document_id)
+        data = {
             "title": title,
             "courseTitle": title,
             "date": date_text,
@@ -347,14 +348,30 @@ def replace_course_documents(db, source_url, title, place, race_date, discipline
             "clubName": rider["club"],
             "source": "VELOPRESSE",
             "sourceUrl": source_url,
-            "updatedAt": now,
-        }))
+        }
+        previous = existing.get(document_id)
+        # Les horodatages ne doivent pas provoquer une réécriture à chaque passage.
+        if previous is None or any(
+            (previous.to_dict() or {}).get(key) != value for key, value in data.items()
+        ):
+            data["updatedAt"] = now
+            documents.append((collection.document(document_id), data))
+
+    stale = [doc for doc_id, doc in existing.items() if doc_id not in active_ids]
 
     for start in range(0, len(documents), 400):
         batch = db.batch()
         for reference, data in documents[start:start + 400]:
-            batch.set(reference, data)
+            # Conserve les classements éventuels sur la fiche d'engagement.
+            batch.set(reference, data, merge=True)
         batch.commit()
+    for start in range(0, len(stale), 400):
+        batch = db.batch()
+        for document in stale[start:start + 400]:
+            batch.delete(document.reference)
+        batch.commit()
+    print(f"Engagés : {len(documents)} modifiés, {len(stale)} retirés, "
+          f"{len(riders) - len(documents)} inchangés")
 
 
 def sync_article(session, db, source_url):
@@ -382,12 +399,6 @@ def sync_result_article(session, db, source_url):
     if not results:
         return 0, 0, "aucun classement détecté"
 
-    previous_result_documents = list(
-        db.collection("ffc_engagements").where(
-            filter=FieldFilter("resultSourceUrl", "==", source_url)
-        ).stream()
-    )
-
     date_iso = race_date.isoformat()
     date_text = race_date.strftime("%d/%m/%Y")
     existing = list(
@@ -395,6 +406,12 @@ def sync_result_article(session, db, source_url):
             filter=FieldFilter("courseDateIso", "==", date_iso)
         ).stream()
     )
+    existing_by_path = {document.reference.path: document.to_dict() or {}
+                        for document in existing}
+    previous_result_documents = [
+        document for document in existing
+        if (document.to_dict() or {}).get("resultSourceUrl") == source_url
+    ]
     by_runner = {}
     for document in existing:
         values = document.to_dict() or {}
@@ -411,6 +428,7 @@ def sync_result_article(session, db, source_url):
 
     now = datetime.now(timezone.utc)
     writes = []
+    active_paths = set()
     matched = 0
     for result in results:
         key = "|".join((
@@ -429,7 +447,8 @@ def sync_result_article(session, db, source_url):
             reference = db.collection("ffc_engagements").document(document_id)
 
         runner_name = clean(f'{result["firstName"]} {result["lastName"]}')
-        writes.append((reference, {
+        active_paths.add(reference.path)
+        data = {
             "title": title, "courseTitle": title,
             "date": date_text, "courseDate": date_text,
             "courseDateIso": date_iso, "place": place,
@@ -440,8 +459,13 @@ def sync_result_article(session, db, source_url):
             "rank": result["rank"],
             "participants": participants_by_category[result["category"]],
             "resultSource": "VELOPRESS", "resultSourceUrl": source_url,
-            "resultUpdatedAt": now, "source": "VELOPRESSE", "updatedAt": now,
-        }))
+            "source": "VELOPRESSE",
+        }
+        previous = existing_by_path.get(reference.path, {})
+        if any(previous.get(field) != value for field, value in data.items()):
+            data["resultUpdatedAt"] = now
+            data["updatedAt"] = now
+            writes.append((reference, data))
 
     for start in range(0, len(writes), 400):
         batch = db.batch()
@@ -451,7 +475,6 @@ def sync_result_article(session, db, source_url):
 
     # Retire les anciennes lignes mal interprétées lorsqu'une page change de
     # format ou lorsque le parseur est amélioré, sans toucher aux autres courses.
-    active_paths = {reference.path for reference, _ in writes}
     stale = [document for document in previous_result_documents
              if document.reference.path not in active_paths]
     for start in range(0, len(stale), 400):
@@ -473,7 +496,9 @@ def cleanup_old_documents(db):
     cutoff = datetime.now(timezone.utc).date() - timedelta(days=PAST_GRACE_DAYS)
     collection = db.collection("ffc_engagements")
     obsolete = []
-    for document in collection.stream():
+    for document in collection.where(
+        filter=FieldFilter("courseDateIso", "<", cutoff.isoformat())
+    ).stream():
         values = document.to_dict() or {}
         if int(values.get("rank") or 0) > 0:
             continue
@@ -508,7 +533,7 @@ def main():
         result_urls = discover_result_urls(session)
 
     if not engagement_urls and not result_urls:
-        removed = cleanup_old_documents(db)
+        removed = cleanup_old_documents(db) if CLEANUP_OLD_DOCS and not MANUAL_URL else 0
         print("Aucune nouvelle fiche d'engagés ou de résultats trouvée sur VéloPresse.")
         print("Anciens docs supprimés :", removed)
         return
@@ -548,7 +573,7 @@ def main():
             errors.append(message)
             print("ERREUR     :", message)
 
-    removed = 0 if MANUAL_URL else cleanup_old_documents(db)
+    removed = cleanup_old_documents(db) if CLEANUP_OLD_DOCS and not MANUAL_URL else 0
     print("\n=== BILAN ===")
     print("Courses synchronisées :", synced)
     print("Engagés écrits         :", total_riders)
