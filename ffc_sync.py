@@ -521,6 +521,13 @@ def cleanup_old_documents(db):
     return len(obsolete)
 
 
+def is_firestore_quota_exceeded(error):
+    """Ne poursuit pas les autres pages après épuisement du quota Firestore."""
+    message = str(error).lower()
+    return ("quota exceeded" in message or "resourceexhausted" in message
+            or "resource_exhausted" in message)
+
+
 def main():
     print("=== SuiviVélo • VéloPresse -> Firebase ===")
     session = requests.Session()
@@ -553,6 +560,11 @@ def main():
             else:
                 print("Ignorée    :", status)
         except Exception as error:
+            if is_firestore_quota_exceeded(error):
+                raise RuntimeError(
+                    "Quota Firestore épuisé : synchronisation arrêtée immédiatement. "
+                    "Attendre le renouvellement du quota avant un nouvel essai."
+                ) from error
             message = f"{source_url} -> {type(error).__name__}: {error}"
             errors.append(message)
             print("ERREUR     :", message)
@@ -569,6 +581,11 @@ def main():
             else:
                 print("Ignorée    :", status)
         except Exception as error:
+            if is_firestore_quota_exceeded(error):
+                raise RuntimeError(
+                    "Quota Firestore épuisé : synchronisation arrêtée immédiatement. "
+                    "Attendre le renouvellement du quota avant un nouvel essai."
+                ) from error
             message = f"{source_url} -> {type(error).__name__}: {error}"
             errors.append(message)
             print("ERREUR     :", message)
